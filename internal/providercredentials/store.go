@@ -448,9 +448,10 @@ func Delete(tokenDir, ifMatch, id string) (Snapshot, error) {
 }
 
 // ImportIfAbsent moves one credential from an older store under the store
-// lock, so a concurrent delete cannot see it come back. retire removes the old
-// copy once load reports nothing to import, the ID is already stored, or the
-// import is published; load and persist errors leave the old copy in place.
+// lock, so a concurrent delete cannot see it come back. An ID already stored
+// skips load and only retires the old copy; otherwise retire runs once load
+// reports nothing to import or the import is published, and load and persist
+// errors leave the old copy in place.
 func ImportIfAbsent(tokenDir, id, endpoint string, load func() (string, bool, error), retire func() error) (Snapshot, error) {
 	if err := validateRecordID(id); err != nil {
 		return Snapshot{}, err
@@ -460,11 +461,15 @@ func ImportIfAbsent(tokenDir, id, endpoint string, load func() (string, bool, er
 		return Snapshot{}, err
 	}
 	return locked(tokenDir, func(current Snapshot, permissions permissionBackend) (Snapshot, error) {
+		if current.Stored(id) {
+			// The stored key wins; a stale or malformed old copy is only retired.
+			return current, retire()
+		}
 		value, ok, err := load()
 		if err != nil {
 			return Snapshot{}, err
 		}
-		if ok && !current.Stored(id) {
+		if ok {
 			if value == "" {
 				return Snapshot{}, errors.New("provider credential cannot be empty")
 			}
