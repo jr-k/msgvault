@@ -306,7 +306,7 @@ func (s *Store) PersonEnrichmentConsentStatus(ctx context.Context, fingerprint s
 
 // HasActivePersonEnrichmentConsent is the narrow exact-purpose egress gate.
 func (s *Store) HasActivePersonEnrichmentConsent(ctx context.Context, fingerprint string) (bool, error) {
-	return hasActiveConsent(ctx, s.db, ConsentPersonEnrichment, fingerprint)
+	return s.hasActiveConsent(ctx, ConsentPersonEnrichment, fingerprint)
 }
 
 func validPersonEnrichmentProviderNamespace(namespace, kind string) bool {

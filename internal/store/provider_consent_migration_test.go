@@ -191,3 +191,30 @@ func TestProviderConsentMigrationKeepsHistoryAndIDs(t *testing.T) {
 	require.NoError(err)
 	assert.Equal(int64(3), next.ID, "IDs keep growing within a purpose after migration")
 }
+
+func TestHasActiveConsentReadsLegacyTableBeforeMigration(t *testing.T) {
+	require := require.New(t)
+	ctx := t.Context()
+	st, _ := newPersonFactLedgerStore(t)
+	fingerprint := strings.Repeat("d", 64)
+	insertRawConsentProfiles(t, st, fingerprint)
+	ddl := legacyConsentDDLSQLite
+	if st.IsPostgreSQL() {
+		ddl = legacyConsentDDLPostgreSQL
+	}
+	_, err := st.db.ExecContext(ctx, ddl)
+	require.NoError(err)
+	_, err = st.db.ExecContext(ctx, `INSERT INTO person_inference_consents
+		(profile_fingerprint, granted_by) VALUES (?, 'alice')`, fingerprint)
+	require.NoError(err)
+	// A read-only open of an old archive sees the legacy tables and no provider_consents.
+	_, err = st.db.ExecContext(ctx, `DROP TABLE provider_consents`)
+	require.NoError(err)
+
+	active, err := st.HasActivePersonInferenceConsent(ctx, fingerprint)
+	require.NoError(err)
+	require.True(active)
+	active, err = st.HasActivePersonSemanticEmbeddingConsent(ctx, fingerprint)
+	require.NoError(err)
+	require.False(active)
+}

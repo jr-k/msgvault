@@ -1,6 +1,7 @@
 package peoplesweep
 
 import (
+	"bytes"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -155,44 +156,50 @@ func (s StoredCredentials) DeleteIfRevision(profileName, endpoint, expected stri
 }
 
 // importLegacy moves a key written by an older release into the shared store,
-// then removes the old file. A key already stored wins over the old file.
+// then removes the old file. A key already stored wins over the old file, and
+// an empty file is how older releases recorded a deleted key.
 func (s StoredCredentials) importLegacy(profileName, endpoint string) error {
 	path := filepath.Join(s.tokensDir, legacyCredentialNamespace, profileName+".json")
-	file, err := os.Open(path) // #nosec G304 -- validated profile name under the tokens directory.
-	if errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("import legacy people provider credential %s (left in place): %w", path, err)
+	load := func() (string, bool, error) {
+		raw, err := readLegacyCredential(path)
+		if errors.Is(err, fs.ErrNotExist) || (err == nil && len(bytes.TrimSpace(raw)) == 0) {
+			return "", false, nil
+		}
+		if err != nil {
+			return "", false, err
+		}
+		var stored credentialFile
+		decoder := jsontext.NewDecoder(bytes.NewReader(raw), json.RejectUnknownMembers(true))
+		if json.UnmarshalDecode(decoder, &stored) != nil || requireCredentialJSONEnd(decoder) != nil {
+			return "", false, errors.New("malformed JSON")
+		}
+		return stored.Value, true, nil
 	}
-	var stored credentialFile
-	decoder := jsontext.NewDecoder(io.LimitReader(file, 16<<10), json.RejectUnknownMembers(true))
-	decodeErr := json.UnmarshalDecode(decoder, &stored)
-	if decodeErr == nil {
-		decodeErr = requireCredentialJSONEnd(decoder)
-	}
-	_ = file.Close()
-	if decodeErr != nil {
-		return fmt.Errorf("import legacy people provider credential %s (left in place): malformed JSON", path)
+	var retireErr error
+	retire := func() error {
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			retireErr = fmt.Errorf("remove imported legacy people provider credential %s: %w", path, err)
+		}
+		return retireErr
 	}
 	id := providercredentials.PeopleProviderID(profileName)
-	snapshot, err := providercredentials.Read(s.tokensDir)
-	if err == nil && !snapshot.Stored(id) {
-		var absent string
-		if absent, err = snapshot.Revision(id); err == nil {
-			_, err = providercredentials.PutIfRevision(s.tokensDir, absent, id, endpoint, stored.Value)
-		}
-		if errors.Is(err, providercredentials.ErrConflict) {
-			err = nil // Another process imported it first.
-		}
-	}
-	if err != nil {
+	_, err := providercredentials.ImportIfAbsent(s.tokensDir, id, endpoint, load, retire)
+	if err != nil && !errors.Is(err, retireErr) {
 		return fmt.Errorf("import legacy people provider credential %s (left in place): %w", path, err)
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("remove imported legacy people provider credential %s: %w", path, err)
+	return err
+}
+
+func readLegacyCredential(path string) ([]byte, error) {
+	file, err := os.Open(path) // #nosec G304 -- validated profile name under the tokens directory.
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	defer file.Close() //nolint:errcheck // read-only file
+	return io.ReadAll(io.LimitReader(file, 16<<10))
 }
 
 // ValidateProviderProfileName applies the single grammar used by provider

@@ -348,7 +348,7 @@ func (s *Store) RevokeAllPersonInferenceConsents(ctx context.Context, actor stri
 
 // HasActivePersonInferenceConsent implements the runner's narrow privacy gate.
 func (s *Store) HasActivePersonInferenceConsent(ctx context.Context, fingerprint string) (bool, error) {
-	return hasActiveConsent(ctx, s.db, ConsentPeopleInference, fingerprint)
+	return s.hasActiveConsent(ctx, ConsentPeopleInference, fingerprint)
 }
 
 func (s *Store) hasActivePersonInferenceConsentTx(ctx context.Context, tx *loggedTx, fingerprint string) (bool, error) {

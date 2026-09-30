@@ -19,10 +19,10 @@ const (
 	ConsentPersonSemanticEmbedding ConsentPurpose = "person_semantic_embedding"
 )
 
-var consentPurposes = map[ConsentPurpose]struct{ profileTable, label string }{
-	ConsentPeopleInference:         {"person_inference_profiles", "people inference"},
-	ConsentPersonEnrichment:        {"person_enrichment_profiles", "person enrichment"},
-	ConsentPersonSemanticEmbedding: {"person_semantic_embedding_profiles", "semantic person embedding"},
+var consentPurposes = map[ConsentPurpose]struct{ profileTable, label, legacyTable string }{
+	ConsentPeopleInference:         {"person_inference_profiles", "people inference", "person_inference_consents"},
+	ConsentPersonEnrichment:        {"person_enrichment_profiles", "person enrichment", "person_enrichment_consents"},
+	ConsentPersonSemanticEmbedding: {"person_semantic_embedding_profiles", "semantic person embedding", "person_semantic_embedding_consents"},
 }
 
 var errConsentChangedConcurrent = errors.New("provider consent changed concurrently")
@@ -217,20 +217,32 @@ func activeConsentFingerprints(ctx context.Context, tx *loggedTx, purpose Consen
 	return fingerprints, nil
 }
 
-func hasActiveConsent(
-	ctx context.Context, q contextStatementQuerier, purpose ConsentPurpose, fingerprint string,
-) (bool, error) {
+func (s *Store) hasActiveConsent(ctx context.Context, purpose ConsentPurpose, fingerprint string) (bool, error) {
 	if err := validateConsentFingerprint(purpose, fingerprint); err != nil {
 		return false, err
 	}
 	var active bool
-	err := q.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM provider_consents
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM provider_consents
 		WHERE purpose = ? AND fingerprint = ? AND revoked_at IS NULL)`,
 		string(purpose), fingerprint).Scan(&active)
+	if legacy := consentPurposes[purpose].legacyTable; err != nil && s.onlyLegacyConsents(legacy) {
+		// A read-only open skips migration, so an old archive keeps grants here.
+		err = s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM `+legacy+`
+			WHERE profile_fingerprint = ? AND revoked_at IS NULL)`, fingerprint).Scan(&active)
+	}
 	if err != nil {
 		return false, fmt.Errorf("check active %s consent: %w", consentPurposes[purpose].label, err)
 	}
 	return active, nil
+}
+
+func (s *Store) onlyLegacyConsents(legacy string) bool {
+	current, err := s.tableExists("provider_consents")
+	if err != nil || current {
+		return false
+	}
+	old, err := s.tableExists(legacy)
+	return err == nil && old
 }
 
 // lockActiveConsentTx reads the active grant under a row lock so a commit

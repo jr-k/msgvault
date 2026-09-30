@@ -424,31 +424,18 @@ func DeleteSuppressionIfValue(tokenDir, value string) (Snapshot, error) {
 	if value == "" {
 		return Snapshot{}, errors.New("suppression key cannot be empty")
 	}
-	permissions := nativePermissions{}
-	if err := permissions.secureDirectory(tokenDir); err != nil {
-		return Snapshot{}, fmt.Errorf("secure credential directory: %w", err)
-	}
-	var result Snapshot
-	err := withStoreLock(tokenDir, func() error {
-		current, err := readWithPermissions(tokenDir, permissions)
-		if err != nil {
-			return err
-		}
+	return locked(tokenDir, func(current Snapshot, permissions permissionBackend) (Snapshot, error) {
 		stored, ok := current.credentials[PersonEnrichmentSuppressionID]
 		if !ok {
-			result = current
-			return nil
+			return current, nil
 		}
 		if subtle.ConstantTimeCompare([]byte(stored.Value), []byte(value)) != 1 {
-			return ErrConflict
+			return Snapshot{}, ErrConflict
 		}
-		credentials := make(map[string]record, len(current.credentials))
-		maps.Copy(credentials, current.credentials)
+		credentials := maps.Clone(current.credentials)
 		delete(credentials, PersonEnrichmentSuppressionID)
-		result, err = persist(tokenDir, permissions, credentials)
-		return err
+		return persist(tokenDir, permissions, credentials)
 	})
-	return result, err
 }
 
 func Delete(tokenDir, ifMatch, id string) (Snapshot, error) {
@@ -460,7 +447,50 @@ func Delete(tokenDir, ifMatch, id string) (Snapshot, error) {
 	})
 }
 
+// ImportIfAbsent moves one credential from an older store under the store
+// lock, so a concurrent delete cannot see it come back. retire removes the old
+// copy once load reports nothing to import, the ID is already stored, or the
+// import is published; load and persist errors leave the old copy in place.
+func ImportIfAbsent(tokenDir, id, endpoint string, load func() (string, bool, error), retire func() error) (Snapshot, error) {
+	if err := validateRecordID(id); err != nil {
+		return Snapshot{}, err
+	}
+	origin, err := EndpointOrigin(endpoint)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return locked(tokenDir, func(current Snapshot, permissions permissionBackend) (Snapshot, error) {
+		value, ok, err := load()
+		if err != nil {
+			return Snapshot{}, err
+		}
+		if ok && !current.Stored(id) {
+			if value == "" {
+				return Snapshot{}, errors.New("provider credential cannot be empty")
+			}
+			credentials := maps.Clone(current.credentials)
+			putRecord(id, origin, value)(credentials)
+			if current, err = persist(tokenDir, permissions, credentials); err != nil {
+				return Snapshot{}, err
+			}
+		}
+		return current, retire()
+	})
+}
+
 func mutate(tokenDir string, precondition func(Snapshot) error, mutation func(map[string]record)) (Snapshot, error) {
+	return locked(tokenDir, func(current Snapshot, permissions permissionBackend) (Snapshot, error) {
+		if err := precondition(current); err != nil {
+			return Snapshot{}, err
+		}
+		credentials := maps.Clone(current.credentials)
+		mutation(credentials)
+		return persist(tokenDir, permissions, credentials)
+	})
+}
+
+// locked runs fn against a fresh read while holding the store lock.
+func locked(tokenDir string, fn func(Snapshot, permissionBackend) (Snapshot, error)) (Snapshot, error) {
 	permissions := nativePermissions{}
 	if err := permissions.secureDirectory(tokenDir); err != nil {
 		return Snapshot{}, fmt.Errorf("secure credential directory: %w", err)
@@ -471,17 +501,8 @@ func mutate(tokenDir string, precondition func(Snapshot) error, mutation func(ma
 		if err != nil {
 			return err
 		}
-		if err := precondition(current); err != nil {
-			return err
-		}
-		credentials := make(map[string]record, len(current.credentials)+1)
-		maps.Copy(credentials, current.credentials)
-		mutation(credentials)
-		result, err = persist(tokenDir, permissions, credentials)
-		if err != nil {
-			return err
-		}
-		return nil
+		result, err = fn(current, permissions)
+		return err
 	})
 	return result, err
 }

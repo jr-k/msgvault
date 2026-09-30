@@ -158,6 +158,22 @@ func TestStoredCredentialsLegacyFileNeverReplacesOrResurrectsStoredKey(t *testin
 	require.ErrorIs(err, peoplesweep.ErrCredentialNotFound)
 }
 
+func TestStoredCredentialsRetiresEmptyLegacyFileAsDeletedKey(t *testing.T) {
+	for _, contents := range []string{"", " \n"} {
+		assert := assert.New(t)
+		require := require.New(t)
+		tokensDir := t.TempDir()
+		path := writeLegacyCredential(t, tokensDir, "remote", contents)
+
+		_, err := peoplesweep.NewStoredCredentials(tokensDir).Load("remote", "https://api.example.test/v1")
+		require.ErrorIs(err, peoplesweep.ErrCredentialNotFound)
+		assert.NoFileExists(path)
+		snapshot, err := providercredentials.Read(tokensDir)
+		require.NoError(err)
+		assert.False(snapshot.Stored(providercredentials.PeopleProviderID("remote")))
+	}
+}
+
 func TestStoredCredentialsLegacyImportFailureKeepsFile(t *testing.T) {
 	t.Run("malformed legacy JSON", func(t *testing.T) {
 		tokensDir := t.TempDir()

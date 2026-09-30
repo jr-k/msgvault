@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -350,4 +351,41 @@ func TestPeopleProviderRecordRoundTripsThroughValidation(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(dir, Filename))
 	requirements.NoError(err)
 	assert.Contains(t, string(raw), `"kind":"people_provider"`)
+}
+
+func TestImportIfAbsentHoldsStoreLockUntilRetired(t *testing.T) {
+	requirements := require.New(t)
+	dir := filepath.Join(t.TempDir(), "tokens")
+	id := PeopleProviderID("remote")
+	imported := Snapshot{credentials: map[string]record{id: {
+		ID: id, Kind: recordKind(id), Value: "legacy", Origin: "https://api.example.test", Revision: 1,
+	}}}
+	importedRevision, err := imported.Revision(id)
+	requirements.NoError(err)
+
+	deleted := make(chan error, 1)
+	load := func() (string, bool, error) {
+		go func() {
+			_, deleteErr := DeleteIfRevision(dir, importedRevision, id)
+			deleted <- deleteErr
+		}()
+		return "legacy", true, nil
+	}
+	retired := false
+	retire := func() error {
+		select {
+		case <-deleted:
+			t.Fatal("delete ran while the import held the store lock")
+		case <-time.After(200 * time.Millisecond):
+		}
+		retired = true
+		return nil
+	}
+	_, err = ImportIfAbsent(dir, id, "https://api.example.test/v1", load, retire)
+	requirements.NoError(err)
+	requirements.NoError(<-deleted, "the delete must run after the import it raced")
+	requirements.True(retired)
+	current, err := Read(dir)
+	requirements.NoError(err)
+	requirements.False(current.Stored(id))
 }

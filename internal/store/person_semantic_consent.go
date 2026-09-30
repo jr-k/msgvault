@@ -164,7 +164,7 @@ func (s *Store) RevokeAllPersonSemanticEmbeddingConsents(ctx context.Context, ac
 }
 
 func (s *Store) HasActivePersonSemanticEmbeddingConsent(ctx context.Context, fingerprint string) (bool, error) {
-	return hasActiveConsent(ctx, s.db, ConsentPersonSemanticEmbedding, fingerprint)
+	return s.hasActiveConsent(ctx, ConsentPersonSemanticEmbedding, fingerprint)
 }
 
 func (s *Store) GetPersonSemanticEmbeddingConsentStatus(ctx context.Context, fingerprint string) (*PersonSemanticEmbeddingConsentStatus, error) {
