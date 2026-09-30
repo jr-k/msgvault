@@ -222,15 +222,132 @@ func TestStoreSerializesSameETagWriters(t *testing.T) {
 }
 
 func TestCredentialIDsAreStableAndValidated(t *testing.T) {
+	require := require.New(t)
 	for _, id := range []string{
 		VectorEmbeddingsID,
 		VectorMultimodalID,
-		PeopleSweepID,
 		PersonEnrichmentID("exa-primary"),
 	} {
-		require.NoError(t, ValidateID(id), id)
+		require.NoError(ValidateID(id), id)
 	}
-	for _, id := range []string{"vector.text", "people.enrichment/", "people.enrichment/../secret", "unknown"} {
-		assert.Error(t, ValidateID(id), id)
+	for _, id := range []string{
+		"vector.text", "people.enrichment/", "people.enrichment/../secret", "unknown", "people.sweep",
+		PeopleProviderID("remote"),
+	} {
+		require.Error(ValidateID(id), id)
 	}
+	require.NoError(validateRecordID(PeopleProviderID("remote")))
+	for _, id := range []string{PeopleProviderID(""), PeopleProviderID("../secret")} {
+		require.Error(validateRecordID(id), id)
+	}
+}
+
+func TestPutIfRevisionRequiresThatCredentialsObservedState(t *testing.T) {
+	requirements := require.New(t)
+	assertions := assert.New(t)
+	dir := filepath.Join(t.TempDir(), "tokens")
+	id := PeopleProviderID("remote")
+
+	empty, err := Read(dir)
+	requirements.NoError(err)
+	absent, err := empty.Revision(id)
+	requirements.NoError(err)
+	written, err := PutIfRevision(dir, absent, id, "https://api.example.test/v1", "a")
+	requirements.NoError(err)
+	value, state, err := written.Resolve(id, "https://api.example.test/v2", "", nil)
+	requirements.NoError(err)
+	assertions.Equal("a", value)
+	assertions.Equal(SourceStored, state.Source)
+
+	_, err = PutIfRevision(dir, absent, id, "https://api.example.test/v1", "b")
+	requirements.ErrorIs(err, ErrConflict)
+
+	current, err := written.Revision(id)
+	requirements.NoError(err)
+	other, err := Put(dir, written.ETag, VectorEmbeddingsID, "https://embeddings.example.test/v1", "vector")
+	requirements.NoError(err)
+	otherRevision, err := other.Revision(id)
+	requirements.NoError(err)
+	assertions.Equal(current, otherRevision)
+	replaced, err := PutIfRevision(dir, current, id, "https://api.example.test/v1", "b")
+	requirements.NoError(err)
+	vectorValue, _, err := replaced.Resolve(VectorEmbeddingsID, "https://embeddings.example.test/v1", "", nil)
+	requirements.NoError(err)
+	assertions.Equal("vector", vectorValue)
+	_, err = PutIfRevision(dir, "", id, "https://api.example.test/v1", "c")
+	assertions.ErrorIs(err, ErrConflict)
+}
+
+func TestPutIfRevisionRejectsTokenFromDeletedAndRecreatedKey(t *testing.T) {
+	requirements := require.New(t)
+	dir := filepath.Join(t.TempDir(), "tokens")
+	id := PeopleProviderID("remote")
+
+	empty, err := Read(dir)
+	requirements.NoError(err)
+	absent, err := empty.Revision(id)
+	requirements.NoError(err)
+	first, err := PutIfRevision(dir, absent, id, "https://api.example.test/v1", "a")
+	requirements.NoError(err)
+	stale, err := first.Revision(id)
+	requirements.NoError(err)
+	cleared, err := DeleteIfRevision(dir, stale, id)
+	requirements.NoError(err)
+	gone, err := cleared.Revision(id)
+	requirements.NoError(err)
+	_, err = PutIfRevision(dir, gone, id, "https://api.example.test/v1", "b")
+	requirements.NoError(err)
+
+	_, err = PutIfRevision(dir, stale, id, "https://api.example.test/v1", "c")
+	requirements.ErrorIs(err, ErrConflict)
+}
+
+func TestDeleteIfRevisionRemovesOnlyTheObservedCredential(t *testing.T) {
+	requirements := require.New(t)
+	assertions := assert.New(t)
+	dir := filepath.Join(t.TempDir(), "tokens")
+	id := PeopleProviderID("remote")
+
+	empty, err := Read(dir)
+	requirements.NoError(err)
+	absent, err := empty.Revision(id)
+	requirements.NoError(err)
+	written, err := PutIfRevision(dir, absent, id, "https://api.example.test/v1", "a")
+	requirements.NoError(err)
+	_, err = DeleteIfRevision(dir, absent, id)
+	requirements.ErrorIs(err, ErrConflict)
+
+	current, err := written.Revision(id)
+	requirements.NoError(err)
+	withOther, err := Put(dir, written.ETag, VectorEmbeddingsID, "https://embeddings.example.test/v1", "vector")
+	requirements.NoError(err)
+	cleared, err := DeleteIfRevision(dir, current, id)
+	requirements.NoError(err)
+	assertions.False(cleared.Stored(id))
+	assertions.True(cleared.Stored(VectorEmbeddingsID))
+	assertions.NotEqual(withOther.ETag, cleared.ETag)
+
+	raw, err := os.ReadFile(filepath.Join(dir, Filename))
+	requirements.NoError(err)
+	assertions.NotContains(string(raw), "people_provider")
+}
+
+func TestPeopleProviderRecordRoundTripsThroughValidation(t *testing.T) {
+	requirements := require.New(t)
+	dir := filepath.Join(t.TempDir(), "tokens")
+	id := PeopleProviderID("remote")
+	empty, err := Read(dir)
+	requirements.NoError(err)
+	absent, err := empty.Revision(id)
+	requirements.NoError(err)
+	_, err = PutIfRevision(dir, absent, id, "https://api.example.test/v1", "a")
+	requirements.NoError(err)
+
+	loaded, err := Read(dir)
+	requirements.NoError(err)
+	_, _, err = loaded.Resolve(id, "https://other.example.test/v1", "", nil)
+	requirements.ErrorIs(err, ErrOriginMismatch)
+	raw, err := os.ReadFile(filepath.Join(dir, Filename))
+	requirements.NoError(err)
+	assert.Contains(t, string(raw), `"kind":"people_provider"`)
 }
