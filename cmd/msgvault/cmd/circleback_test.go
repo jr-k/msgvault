@@ -105,7 +105,7 @@ func TestFinishCirclebackImportRefreshesOnlyAfterCommittedWrites(t *testing.T) {
 	tests := []struct {
 		name          string
 		cancelContext bool
-		sum           *circleback.ImportSummary
+		writes        int64
 		importErr     error
 		wantRefreshes int
 		wantError     string
@@ -113,14 +113,14 @@ func TestFinishCirclebackImportRefreshesOnlyAfterCommittedWrites(t *testing.T) {
 		{
 			name:          "cancellation after write",
 			cancelContext: true,
-			sum:           &circleback.ImportSummary{MeetingsAdded: 1},
+			writes:        1,
 			importErr:     context.Canceled,
 			wantRefreshes: 1,
 			wantError:     "canceled",
 		},
 		{
 			name:          "hard error after write",
-			sum:           &circleback.ImportSummary{MeetingsUpdated: 1},
+			writes:        1,
 			importErr:     errors.New("provider failed"),
 			wantRefreshes: 1,
 			wantError:     "failed",
@@ -128,13 +128,11 @@ func TestFinishCirclebackImportRefreshesOnlyAfterCommittedWrites(t *testing.T) {
 		{
 			name:          "cancellation before write",
 			cancelContext: true,
-			sum:           &circleback.ImportSummary{},
 			importErr:     context.Canceled,
 			wantError:     "canceled",
 		},
 		{
 			name:      "hard error before write",
-			sum:       &circleback.ImportSummary{},
 			importErr: errors.New("provider failed"),
 			wantError: "failed",
 		},
@@ -151,7 +149,7 @@ func TestFinishCirclebackImportRefreshesOnlyAfterCommittedWrites(t *testing.T) {
 			}
 			refreshes := 0
 
-			err := finishCirclebackImport(ctx, "alice@example.com", tc.sum, tc.importErr, func() error {
+			err := finishMeetingImport("circleback", "alice@example.com", tc.writes, tc.importErr, circlebackCanceled(ctx, tc.importErr), func() error {
 				refreshes++
 				return nil
 			})
@@ -170,19 +168,20 @@ func TestFinishCirclebackImportRefreshesOnlyAfterCommittedWrites(t *testing.T) {
 func TestFinishCirclebackImportRefreshesEarlierSourceWritesOnLaterFailure(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
-	total := &circleback.ImportSummary{}
-	accumulateCirclebackWrites(total, &circleback.ImportSummary{MeetingsAdded: 2})
-	accumulateCirclebackWrites(total, &circleback.ImportSummary{MeetingsUpdated: 1})
+	var total int64
+	for _, sum := range []*circleback.ImportSummary{{MeetingsAdded: 2}, {MeetingsUpdated: 1}} {
+		total += sum.MeetingsAdded + sum.MeetingsUpdated
+	}
 	refreshes := 0
+	connectErr := errors.New("connect failed")
 
-	err := finishCirclebackImport(context.Background(), "second", total, errors.New("connect failed"), func() error {
+	err := finishMeetingImport("circleback", "second", total, connectErr, circlebackCanceled(context.Background(), connectErr), func() error {
 		refreshes++
 		return nil
 	})
 
 	require.ErrorContains(err, "circleback sync second failed")
-	assert.EqualValues(2, total.MeetingsAdded)
-	assert.EqualValues(1, total.MeetingsUpdated)
+	assert.EqualValues(3, total)
 	assert.Equal(1, refreshes, "a later source failure must refresh writes committed by earlier sources")
 }
 
@@ -211,11 +210,14 @@ func TestFinishScheduledCirclebackImportUsesDetachedRefreshContext(t *testing.T)
 			refreshes := 0
 			var refreshContextErr error
 
-			err := finishScheduledCirclebackImport(
+			err := finishScheduledMeetingImport(
 				ctx,
+				"circleback",
 				"work",
-				&circleback.ImportSummary{MeetingsAdded: 1},
+				"circleback:work",
+				1,
 				tc.importErr,
+				circlebackCanceled(ctx, tc.importErr),
 				func(refreshCtx context.Context, identifier string) error {
 					refreshes++
 					cancel()
@@ -240,11 +242,14 @@ func TestFinishScheduledCirclebackImportReturnsRefreshError(t *testing.T) {
 	importErr := errors.New("provider failed")
 	refreshErr := errors.New("refresh failed")
 
-	err := finishScheduledCirclebackImport(
+	err := finishScheduledMeetingImport(
 		context.Background(),
+		"circleback",
 		"work",
-		&circleback.ImportSummary{MeetingsAdded: 1},
+		"circleback:work",
+		1,
 		importErr,
+		nil,
 		func(context.Context, string) error { return refreshErr },
 	)
 

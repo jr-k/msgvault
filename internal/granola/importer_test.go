@@ -10,10 +10,10 @@ import (
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/meetingarchive"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
 )
@@ -526,9 +526,9 @@ func TestIngestNote_RawFailureRollsBackCanonicalWrite(t *testing.T) {
 	require.NoError(json.Unmarshal(raw, &note))
 	note.Raw = append(json.RawMessage(nil), raw...)
 
-	added, err := imp.ingestNote(source.ID, "alice@example.com", nil, &note)
+	result, err := imp.ingestNote(t.Context(), meetingarchive.New(st), source.ID, ImportOptions{Identifier: "alice@example.com"}, &note)
 	require.Error(err)
-	assert.False(added)
+	assert.False(result.Created)
 	assert.Contains(err.Error(), "upsert raw")
 
 	for table, want := range map[string]int{
@@ -924,29 +924,4 @@ func TestImport_RepeatedPageCursorFails(t *testing.T) {
 
 	_, err := imp.Import(ctx, ImportOptions{Identifier: "alice@example.com"})
 	require.ErrorContains(err, "repeated page cursor")
-}
-
-func TestFormatTranscriptLine(t *testing.T) {
-	assert := assert.New(t)
-	tests := []struct {
-		seconds int
-		want    string
-	}{
-		{0, "[00:00] A: x"},
-		{71, "[01:11] A: x"},
-		{3692, "[1:01:32] A: x"},
-	}
-	for _, tc := range tests {
-		assert.Equal(tc.want, formatTranscriptLine(time.Duration(tc.seconds)*time.Second, "A", "x"))
-	}
-}
-
-func TestSnippetPreservesUTF8(t *testing.T) {
-	assert := assert.New(t)
-	body := strings.Repeat("a", 199) + "é" + "tail"
-
-	got := snippet(body)
-
-	assert.True(utf8.ValidString(got))
-	assert.Equal(strings.Repeat("a", 199)+"é", got)
 }
