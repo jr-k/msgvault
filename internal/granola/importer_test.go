@@ -538,6 +538,7 @@ func TestIngestNote_RawFailureRollsBackCanonicalWrite(t *testing.T) {
 		"message_raw":        0,
 		"message_recipients": 0,
 		"messages_fts":       0,
+		"participants":       0,
 	} {
 		var got int
 		require.NoError(st.DB().QueryRow("SELECT COUNT(*) FROM "+table).Scan(&got), table)

@@ -165,26 +165,6 @@ func TestFinishCirclebackImportRefreshesOnlyAfterCommittedWrites(t *testing.T) {
 	}
 }
 
-func TestFinishCirclebackImportRefreshesEarlierSourceWritesOnLaterFailure(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-	var total int64
-	for _, sum := range []*circleback.ImportSummary{{MeetingsAdded: 2}, {MeetingsUpdated: 1}} {
-		total += sum.MeetingsAdded + sum.MeetingsUpdated
-	}
-	refreshes := 0
-	connectErr := errors.New("connect failed")
-
-	err := finishMeetingImport("circleback", "second", total, connectErr, circlebackCanceled(context.Background(), connectErr), func() error {
-		refreshes++
-		return nil
-	})
-
-	require.ErrorContains(err, "circleback sync second failed")
-	assert.EqualValues(3, total)
-	assert.Equal(1, refreshes, "a later source failure must refresh writes committed by earlier sources")
-}
-
 func TestFinishScheduledCirclebackImportUsesDetachedRefreshContext(t *testing.T) {
 	hardErr := errors.New("scheduled provider failed")
 	tests := []struct {

@@ -2050,6 +2050,7 @@ func TestIngestMeeting_RawFailureRollsBackCanonicalRefresh(t *testing.T) {
 	require.NoError(err)
 	msgID := circlebackMessageID(t, st)
 	before := circlebackPersistenceSnapshot(t, st, msgID)
+	participantsBefore := circlebackStringRows(t, st, `SELECT email_address FROM participants ORDER BY email_address`)
 
 	_, err = st.DB().Exec(`
 		CREATE TRIGGER fail_circleback_raw_archive
@@ -2076,6 +2077,8 @@ func TestIngestMeeting_RawFailureRollsBackCanonicalRefresh(t *testing.T) {
 	assert.Contains(err.Error(), "upsert raw")
 	assert.Equal(before, circlebackPersistenceSnapshot(t, st, msgID),
 		"a late canonical write failure must roll back the message and every related row")
+	assert.Equal(participantsBefore, circlebackStringRows(t, st, `SELECT email_address FROM participants ORDER BY email_address`),
+		"a late canonical write failure must not leave new participants behind")
 }
 
 func TestImport_MessageLookupFailureMarksSyncFailed(t *testing.T) {

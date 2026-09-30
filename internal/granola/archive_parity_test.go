@@ -271,6 +271,10 @@ func TestGranolaArchiveRowsMatchBase(t *testing.T) {
 	wantCounts := map[string]int{"messages": 2, "conversations": 2, "participants": 4, "conversation_participants": 4, "message_recipients": 6}
 	check("unlimited", both, wantParticipants, wantCounts)
 
+	// A stale derived preview with unchanged evidence is left alone by an
+	// incremental sync; --full must rewrite it.
+	_, err = st.DB().Exec(st.Rebind(`UPDATE messages SET snippet = ? WHERE source_message_id = ?`), "stale", parityNoteID)
+	require.NoError(err)
 	forced, err := imp.Import(context.Background(), ImportOptions{
 		Identifier: "alice@example.com", AccountEmail: "alice@example.com", Full: true,
 	})
