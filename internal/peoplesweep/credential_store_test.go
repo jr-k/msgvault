@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -21,14 +22,17 @@ const credentialCanary = "test-credential-canary"
 func writeLegacyCredential(t *testing.T, tokensDir, name, contents string) string {
 	t.Helper()
 	// Windows drops inherited access from older children when the store first
-	// secures the tokens directory, so create the store before the legacy file.
-	empty, err := providercredentials.Read(tokensDir)
-	require.NoError(t, err)
-	unused := providercredentials.PeopleProviderID("unused-fixture")
-	absent, err := empty.Revision(unused)
-	require.NoError(t, err)
-	_, err = providercredentials.DeleteIfRevision(tokensDir, absent, unused)
-	require.NoError(t, err)
+	// secures the tokens directory, so create the store first there; other OSes
+	// keep the real upgrade order, with no store yet.
+	if runtime.GOOS == "windows" {
+		empty, err := providercredentials.Read(tokensDir)
+		require.NoError(t, err)
+		unused := providercredentials.PeopleProviderID("unused-fixture")
+		absent, err := empty.Revision(unused)
+		require.NoError(t, err)
+		_, err = providercredentials.DeleteIfRevision(tokensDir, absent, unused)
+		require.NoError(t, err)
+	}
 	path := filepath.Join(tokensDir, "people-providers", name+".json")
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
 	require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
