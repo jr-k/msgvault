@@ -584,3 +584,29 @@ func TestDraftComposePersonKeepsSourceChecks(t *testing.T) {
 	assert.Empty(events)
 	assert.Zero(*f.providerCalls)
 }
+
+func TestDraftComposePersonListsCaseDistinctIdentifiers(t *testing.T) {
+	require := require.New(t)
+	f := newPersonDraftFixture(t)
+	st := f.store
+	person, err := st.GetPersonContext(t.Context(), f.personID)
+	require.NoError(err)
+	upperID, err := st.EnsureParticipantByIdentifier("matrix", "@Carol:example.org", "")
+	require.NoError(err)
+	lowerID, err := st.EnsureParticipantByIdentifier("matrix", "@carol:example.org", "")
+	require.NoError(err)
+	require.NotEqual(upperID, lowerID)
+	for _, member := range []int64{upperID, lowerID} {
+		_, err = st.LinkParticipants(person.ParticipantIDs[0], member)
+		require.NoError(err)
+	}
+	person, err = st.GetPersonContext(t.Context(), f.personID)
+	require.NoError(err)
+	require.Subset(person.ParticipantIDs, []int64{upperID, lowerID})
+
+	rows := f.listPerson(t, f.adapter, f.personID)
+	assert.Subset(t, rows, []personDraftAddress{
+		{Kind: "matrix", Value: "@Carol:example.org"},
+		{Kind: "matrix", Value: "@carol:example.org"},
+	})
+}

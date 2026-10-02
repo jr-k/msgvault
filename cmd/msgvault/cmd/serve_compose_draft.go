@@ -275,7 +275,11 @@ func (a *storeAPIAdapter) personDraftAddresses(
 				return
 			}
 		}
-		key := [2]string{kind, strings.ToLower(value)}
+		// Only email compares case-insensitively; chat IDs such as Matrix IDs are case-sensitive.
+		key := [2]string{kind, value}
+		if kind == "email" {
+			key[1] = strings.ToLower(value)
+		}
 		if !unsupported[key] {
 			unsupported[key] = true
 			rows = append(rows, personDraftAddress{Kind: kind, Value: value})
