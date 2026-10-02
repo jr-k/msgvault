@@ -897,16 +897,20 @@ func TestMessageMediaOccurrences(t *testing.T) {
 	require.NoError(err)
 	assert.Empty(list(replaced.messageID))
 
-	// The worker blocks an untyped oversized file as unsupported_media; only audio
-	// among those is a recording. Audio typed from its header and blocked later stays.
+	// Discovery blocks an untyped oversized file as unsupported_media; only audio among
+	// those is a recording. Audio blocked after retention began stays, whatever the code.
 	gmail, err := f.Store.GetOrCreateSource("gmail", "other@example.com")
 	require.NoError(err)
 	gmailConversation, err := f.Store.EnsureConversation(gmail.ID, "gmail-thread", "Thread")
 	require.NoError(err)
-	for _, file := range []struct{ name, mime, mediaType, code string }{
-		{"clip.mp4", "video/mp4", "video", "unsupported_media"},
-		{"memo.mp3", "application/octet-stream", "", "unsupported_media"},
-		{"attachment.bin", "application/octet-stream", "", "credential_unavailable"},
+	for _, file := range []struct {
+		name, mime, mediaType, code string
+		discovered, hidden          bool
+	}{
+		{"clip.mp4", "video/mp4", "video", "unsupported_media", true, true},
+		{"memo.mp3", "application/octet-stream", "", "unsupported_media", true, false},
+		{"attachment.bin", "application/octet-stream", "", "credential_unavailable", false, false},
+		{"header.bin", "application/octet-stream", "", "unsupported_media", false, false},
 	} {
 		video := addBeeperAudio(t, f.Store, gmail.ID, gmailConversation, "gmail-"+file.name, sha256Text(file.name))
 		_, err = f.Store.DB().Exec(f.Store.Rebind(`UPDATE attachments SET filename = ?, mime_type = ?, media_type = ?
@@ -914,19 +918,25 @@ func TestMessageMediaOccurrences(t *testing.T) {
 		require.NoError(err)
 		mapping := video.mapping("reader", "r1", "")
 		mapping.SourceType, mapping.SourceIdentifier, mapping.SourceConversationID = "gmail", "other@example.com", "gmail-thread"
-		require.NoError(f.Store.ReconcileBeeperMediaMapping(ctx, mapping))
-		prepared, err := f.Store.PrepareBeeperMediaOperation(ctx, retainOperation(mapping))
-		require.NoError(err)
-		applied, err := f.Store.FinishBeeperMediaOperation(ctx, prepared, store.BeeperMediaResult{ErrorCode: file.code})
-		require.NoError(err)
-		require.True(applied)
+		if file.discovered {
+			mapping.RetentionState, mapping.ErrorCode = store.BeeperMediaRetentionBlocked, file.code
+			require.NoError(f.Store.ReconcileBeeperMediaMapping(ctx, mapping))
+		} else {
+			require.NoError(f.Store.ReconcileBeeperMediaMapping(ctx, mapping))
+			prepared, err := f.Store.PrepareBeeperMediaOperation(ctx, retainOperation(mapping))
+			require.NoError(err)
+			applied, err := f.Store.FinishBeeperMediaOperation(ctx, prepared, store.BeeperMediaResult{ErrorCode: file.code})
+			require.NoError(err)
+			require.True(applied)
+		}
 		listed := list(video.messageID)
-		if file.mediaType == "video" {
+		if file.hidden {
 			assert.Empty(listed, file.name)
 			continue
 		}
 		require.Len(listed, 1, file.name)
-		assert.Equal(store.BeeperMediaRetentionBlocked, listed[0].RetentionState)
+		assert.Equal(store.BeeperMediaRetentionBlocked, listed[0].RetentionState, file.name)
+		assert.Equal(file.code, listed[0].ErrorCode, file.name)
 	}
 
 	// Audio that never reached the archive is listed without Docbank identity; other media is not.
