@@ -6,6 +6,14 @@ description: Release history for msgvault
 
 All notable changes to msgvault, grouped by release.
 
+## Unreleased
+
+- msgvault sends anonymous usage telemetry: a daemon ping at startup and every
+  24 hours, and an `app_opened` event the web UI reports through the daemon once
+  per UTC day. Events carry the version, commit, OS, architecture and a random
+  install ID, never archive content. `MSGVAULT_TELEMETRY_ENABLED=0` turns it
+  off. See [telemetry](configuration.md#telemetry).
+
 ## 0.21.0
 <small>2026-10-02</small>
 

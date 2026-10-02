@@ -1472,6 +1472,34 @@ ownership and permission checks to the target directory.
 | `MSGVAULT_HOME` | Base directory for all data (default: `~/.msgvault`) |
 | `MSGVAULT_REMOTE_URL` | Remote URL for `export-token` (flag > env > config) |
 | `MSGVAULT_REMOTE_API_KEY` | Remote API key for `export-token` (flag > env > config) |
+| `MSGVAULT_TELEMETRY_ENABLED` | Set to `0` to turn off anonymous telemetry ([Telemetry](#telemetry)) |
+
+## Telemetry
+
+`msgvault serve` sends anonymous usage telemetry to PostHog: a `daemon_active`
+event when the daemon starts and every 24 hours while it runs, and an
+`app_opened` event when the web UI opens and on its first focus each later UTC
+day. The browser reports `app_opened` to the daemon, never to PostHog. Each
+event carries only:
+
+- the product name and source (`msgvault`, `daemon`)
+- the msgvault version and commit
+- the operating system and CPU architecture
+- a random install ID kept in `telemetry-install-id` in the data directory, and
+  the whole hours since it was created
+- metadata the PostHog Go library adds itself: library name and version (`$lib`,
+  `$lib_version`), OS name, Go version, and where available the OS version and
+  distribution
+
+Events never include messages, contacts, accounts, sources, file names or search
+queries. They ask PostHog not to build person profiles or look up location. The
+daemon queues each event and sends it in the background, so an event can be lost
+if the network is down or the daemon stops first.
+
+Set `MSGVAULT_TELEMETRY_ENABLED=0` or `TELEMETRY_ENABLED=0` in the environment
+that starts the daemon, then restart a running daemon. A CLI command that starts
+a local daemon passes its environment to it. Builds made with the
+`kit_posthog_disabled` tag never send telemetry.
 
 ## File Locations
 
@@ -1485,6 +1513,7 @@ All data lives under the msgvault home directory (`~/.msgvault` on macOS/Linux, 
 | `tokens/` | OAuth tokens per account |
 | `logs/` | Structured log files (when [file logging](/docs/configuration/#log) is enabled) |
 | `analytics/` | Parquet cache files for Web UI and TUI analytical views |
+| `telemetry-install-id` | Random anonymous install ID for [telemetry](#telemetry); created only while telemetry is on |
 
 ## Example configuration
 

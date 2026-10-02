@@ -3,6 +3,7 @@
   import { Button } from '@kenn-io/kit-ui';
   import { onMount } from 'svelte';
   import { receiveGoogleContactsCallback } from './lib/settings/google-authorization';
+  import { createAppOpenedReporter } from './lib/telemetry/app-opened';
   import { createSessionController, type SessionController } from './lib/api/session.svelte';
   import Login from './lib/components/auth/Login.svelte';
   import SettingsWorkspace from './lib/components/settings/SettingsWorkspace.svelte';
@@ -33,6 +34,7 @@
   // read the daemon before the save, so these values win over its result,
   // and a saved search mode keeps it from reconfiguring the open view.
   let savedSinceDefaultsLoad: SavedAppearance = {};
+  const appOpened = createAppOpenedReporter();
   onMount(() => {
     oauthCallback = receiveGoogleContactsCallback();
     if (!oauthCallback) void session.bootstrap();
@@ -56,6 +58,11 @@
     const generation = ++browserDefaultsRequestGeneration;
     savedSinceDefaultsLoad = {};
     void loadBrowserDefaults(generation);
+  });
+  // Reporting needs the session, so it runs only while authenticated; the reporter dedupes by UTC day.
+  $effect(() => {
+    if (session.authMode === undefined || session.authMode === 'required') return;
+    return appOpened.start(session.client);
   });
   async function loadBrowserDefaults(generation: number): Promise<void> {
     try {
