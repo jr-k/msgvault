@@ -592,6 +592,13 @@ type MessageMediaOccurrence struct {
 	DeliveryPhase    string
 }
 
+// messageAudioHint matches attachment a when its metadata says audio. The media
+// worker also blocks oversized files of any type, which are not recordings.
+const messageAudioHint = `(COALESCE(a.media_type, '') IN ('audio', 'voice_note')
+	OR LOWER(COALESCE(a.mime_type, '')) LIKE 'audio/%'
+	OR LOWER(COALESCE(a.filename, '')) LIKE '%.wav'
+	OR LOWER(COALESCE(a.filename, '')) LIKE '%.mp3')`
+
 // ListMessageMediaOccurrences returns the message's current, non-revoked
 // recordings for destination. It only reads; stale mappings stay as they are
 // for the media worker to revoke.
@@ -610,6 +617,7 @@ func (s *Store) ListMessageMediaOccurrences(
 		  ON d.destination_key = o.destination_key AND d.processing_key = o.processing_key`+
 		beeperMediaCurrentJoin+`
 		  AND o.destination_key = ? AND m.id = ? AND o.retention_state <> 'revoked'
+		  AND (o.retention_state <> 'blocked' OR `+messageAudioHint+`)
 		ORDER BY a.id, o.occurrence_ref, o.revision`), destination, messageID)
 	if err != nil {
 		return nil, fmt.Errorf("list message media occurrences: %w", err)

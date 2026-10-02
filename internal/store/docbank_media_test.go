@@ -897,6 +897,35 @@ func TestMessageMediaOccurrences(t *testing.T) {
 	require.NoError(err)
 	assert.Empty(list(replaced.messageID))
 
+	// The worker blocks an oversized file of any type; only audio is a recording.
+	gmail, err := f.Store.GetOrCreateSource("gmail", "other@example.com")
+	require.NoError(err)
+	gmailConversation, err := f.Store.EnsureConversation(gmail.ID, "gmail-thread", "Thread")
+	require.NoError(err)
+	for _, file := range []struct{ name, mime, mediaType string }{
+		{"clip.mp4", "video/mp4", "video"}, {"memo.mp3", "application/octet-stream", ""},
+	} {
+		video := addBeeperAudio(t, f.Store, gmail.ID, gmailConversation, "gmail-"+file.name, sha256Text(file.name))
+		_, err = f.Store.DB().Exec(f.Store.Rebind(`UPDATE attachments SET filename = ?, mime_type = ?, media_type = ?
+			WHERE id = ?`), file.name, file.mime, file.mediaType, video.attachmentID)
+		require.NoError(err)
+		mapping := video.mapping("reader", "r1", "")
+		mapping.SourceType, mapping.SourceIdentifier, mapping.SourceConversationID = "gmail", "other@example.com", "gmail-thread"
+		require.NoError(f.Store.ReconcileBeeperMediaMapping(ctx, mapping))
+		prepared, err := f.Store.PrepareBeeperMediaOperation(ctx, retainOperation(mapping))
+		require.NoError(err)
+		applied, err := f.Store.FinishBeeperMediaOperation(ctx, prepared, store.BeeperMediaResult{ErrorCode: "unsupported_media"})
+		require.NoError(err)
+		require.True(applied)
+		listed := list(video.messageID)
+		if file.mediaType == "video" {
+			assert.Empty(listed, file.name)
+			continue
+		}
+		require.Len(listed, 1, file.name)
+		assert.Equal(store.BeeperMediaRetentionBlocked, listed[0].RetentionState)
+	}
+
 	// Audio that never reached the archive is listed without Docbank identity; other media is not.
 	for _, write := range []store.AttachmentWrite{
 		{Filename: "late.ogg", MIMEType: "audio/ogg", Size: 12, SourceAttachmentID: "beeper:late",
@@ -923,4 +952,9 @@ func TestMessageMediaOccurrences(t *testing.T) {
 	require.Error(err)
 	_, err = f.Store.ListMessageMediaOccurrences(ctx, "reader", 0)
 	require.Error(err)
+}
+
+func sha256Text(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
 }

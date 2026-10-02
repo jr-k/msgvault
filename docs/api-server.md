@@ -1524,8 +1524,9 @@ Docbank recorded them.
 
 Only live messages list recordings. A message that is hidden as a duplicate,
 deleted from its source, or whose audio bytes changed returns an empty list.
-When the Docbank integration is off or misconfigured, every message returns
-`{"message_id": N, "recordings": []}`. A non-positive or non-numeric ID returns
+When the Docbank integration is off, or its `url` is invalid, every message
+returns `{"message_id": N, "recordings": []}`. A missing API key or an
+unreachable Docbank leaves retained recordings `unavailable`. A non-positive or non-numeric ID returns
 `400 invalid_id`.
 
 ---

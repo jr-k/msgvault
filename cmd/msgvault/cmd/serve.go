@@ -720,7 +720,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 	messageRecordings, err := newMessageRecordingReader(ctx, s, cfg.Integrations.Docbank)
 	if err != nil {
 		logger.Warn("Message recordings unavailable", "error", err)
-		messageRecordings = nil
 	}
 
 	// Create and start API server
