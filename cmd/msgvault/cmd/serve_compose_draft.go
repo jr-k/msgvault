@@ -5,6 +5,7 @@ import (
 	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
+	"net/mail"
 	"strconv"
 	"strings"
 	"time"
@@ -267,7 +268,9 @@ func (a *storeAPIAdapter) personDraftAddresses(
 			if address, key, err := parseDraftSender(value); err == nil {
 				if !eligible[key] {
 					eligible[key] = true
-					rows = append(rows, personDraftAddress{Kind: kind, Value: address.Address, Supported: true})
+					// String keeps local-part quoting so the listed value parses back as --to.
+					mailbox := (&mail.Address{Address: address.Address}).String()
+					rows = append(rows, personDraftAddress{Kind: kind, Value: mailbox[1 : len(mailbox)-1], Supported: true})
 				}
 				return
 			}
