@@ -897,13 +897,16 @@ func TestMessageMediaOccurrences(t *testing.T) {
 	require.NoError(err)
 	assert.Empty(list(replaced.messageID))
 
-	// The worker blocks an oversized file of any type; only audio is a recording.
+	// The worker blocks an untyped oversized file as unsupported_media; only audio
+	// among those is a recording. Audio typed from its header and blocked later stays.
 	gmail, err := f.Store.GetOrCreateSource("gmail", "other@example.com")
 	require.NoError(err)
 	gmailConversation, err := f.Store.EnsureConversation(gmail.ID, "gmail-thread", "Thread")
 	require.NoError(err)
-	for _, file := range []struct{ name, mime, mediaType string }{
-		{"clip.mp4", "video/mp4", "video"}, {"memo.mp3", "application/octet-stream", ""},
+	for _, file := range []struct{ name, mime, mediaType, code string }{
+		{"clip.mp4", "video/mp4", "video", "unsupported_media"},
+		{"memo.mp3", "application/octet-stream", "", "unsupported_media"},
+		{"attachment.bin", "application/octet-stream", "", "credential_unavailable"},
 	} {
 		video := addBeeperAudio(t, f.Store, gmail.ID, gmailConversation, "gmail-"+file.name, sha256Text(file.name))
 		_, err = f.Store.DB().Exec(f.Store.Rebind(`UPDATE attachments SET filename = ?, mime_type = ?, media_type = ?
@@ -914,7 +917,7 @@ func TestMessageMediaOccurrences(t *testing.T) {
 		require.NoError(f.Store.ReconcileBeeperMediaMapping(ctx, mapping))
 		prepared, err := f.Store.PrepareBeeperMediaOperation(ctx, retainOperation(mapping))
 		require.NoError(err)
-		applied, err := f.Store.FinishBeeperMediaOperation(ctx, prepared, store.BeeperMediaResult{ErrorCode: "unsupported_media"})
+		applied, err := f.Store.FinishBeeperMediaOperation(ctx, prepared, store.BeeperMediaResult{ErrorCode: file.code})
 		require.NoError(err)
 		require.True(applied)
 		listed := list(video.messageID)

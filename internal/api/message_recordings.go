@@ -60,15 +60,10 @@ type MessageTranscriptUnit struct {
 	Speaker string `json:"speaker,omitempty"`
 }
 
-// MessageRecordingStore reads a message's current media occurrences.
-type MessageRecordingStore interface {
-	ListMessageMediaOccurrences(ctx context.Context, destination string, messageID int64) ([]store.MessageMediaOccurrence, error)
-}
-
 // MessageRecordingReader joins local recordings with Docbank transcript
 // evidence. Transcript text is read on demand and never stored.
 type MessageRecordingReader struct {
-	Store         MessageRecordingStore
+	Store         *store.Store
 	Client        *docbankmedia.Client
 	Destination   string
 	UploadConsent bool

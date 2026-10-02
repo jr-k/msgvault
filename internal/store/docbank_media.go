@@ -593,7 +593,8 @@ type MessageMediaOccurrence struct {
 }
 
 // messageAudioHint matches attachment a when its metadata says audio. The media
-// worker also blocks oversized files of any type, which are not recordings.
+// worker marks files it never typed unsupported_media; only audio among them is a
+// recording, while other blocked rows were already known to be audio.
 const messageAudioHint = `(COALESCE(a.media_type, '') IN ('audio', 'voice_note')
 	OR LOWER(COALESCE(a.mime_type, '')) LIKE 'audio/%'
 	OR LOWER(COALESCE(a.filename, '')) LIKE '%.wav'
@@ -617,7 +618,8 @@ func (s *Store) ListMessageMediaOccurrences(
 		  ON d.destination_key = o.destination_key AND d.processing_key = o.processing_key`+
 		beeperMediaCurrentJoin+`
 		  AND o.destination_key = ? AND m.id = ? AND o.retention_state <> 'revoked'
-		  AND (o.retention_state <> 'blocked' OR `+messageAudioHint+`)
+		  AND NOT (o.retention_state = 'blocked' AND o.error_code = 'unsupported_media'
+		    AND NOT `+messageAudioHint+`)
 		ORDER BY a.id, o.occurrence_ref, o.revision`), destination, messageID)
 	if err != nil {
 		return nil, fmt.Errorf("list message media occurrences: %w", err)
