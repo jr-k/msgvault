@@ -574,6 +574,91 @@ func (s *Store) currentBeeperMediaMessage(ctx context.Context, mapping BeeperMed
 	return true, nil
 }
 
+// MessageMediaOccurrence is one live recording on a message: a captured
+// occurrence with its Docbank identity, or an audio attachment that was never
+// captured, which has an empty OccurrenceRef and no Docbank identity.
+type MessageMediaOccurrence struct {
+	AttachmentID     int64
+	Filename         string
+	Size             int64
+	OccurrenceRef    string
+	Revision         string
+	RetentionState   string
+	ErrorCode        string
+	VaultUID         string
+	DocbankSourceID  string
+	SourceVersionID  string
+	ContentVersionID string
+	DeliveryPhase    string
+}
+
+// ListMessageMediaOccurrences returns the message's current, non-revoked
+// recordings for destination. It only reads; stale mappings stay as they are
+// for the media worker to revoke.
+func (s *Store) ListMessageMediaOccurrences(
+	ctx context.Context, destination string, messageID int64,
+) ([]MessageMediaOccurrence, error) {
+	if destination == "" || messageID < 1 {
+		return nil, errors.New("message media occurrence query is invalid")
+	}
+	rows, err := s.db.QueryContext(ctx, s.Rebind(`
+		SELECT a.id, COALESCE(a.filename, ''), COALESCE(a.size, 0), o.occurrence_ref, o.revision,
+		       o.retention_state, o.error_code, o.vault_uid, o.source_id, o.source_version_id,
+		       o.content_version_id, COALESCE(d.phase, '')
+		FROM beeper_media_occurrences o
+		LEFT JOIN beeper_media_deliveries d
+		  ON d.destination_key = o.destination_key AND d.processing_key = o.processing_key`+
+		beeperMediaCurrentJoin+`
+		  AND o.destination_key = ? AND m.id = ? AND o.retention_state <> 'revoked'
+		ORDER BY a.id, o.occurrence_ref, o.revision`), destination, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("list message media occurrences: %w", err)
+	}
+	var occurrences []MessageMediaOccurrence
+	for rows.Next() {
+		var o MessageMediaOccurrence
+		if err := rows.Scan(&o.AttachmentID, &o.Filename, &o.Size, &o.OccurrenceRef, &o.Revision,
+			&o.RetentionState, &o.ErrorCode, &o.VaultUID, &o.DocbankSourceID, &o.SourceVersionID,
+			&o.ContentVersionID, &o.DeliveryPhase); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan message media occurrence: %w", err)
+		}
+		occurrences = append(occurrences, o)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("iterate message media occurrences: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close message media occurrences: %w", err)
+	}
+
+	// Audio whose bytes never reached the archive has no occurrence to read.
+	rows, err = s.db.QueryContext(ctx, s.Rebind(`
+		SELECT a.id, COALESCE(a.filename, ''), COALESCE(a.size, 0)
+		FROM attachments a
+		JOIN messages m ON m.id = a.message_id
+		WHERE m.id = ? AND `+LiveMessagesWhere("m", true)+`
+		  AND COALESCE(a.media_type, '') IN ('audio', 'voice_note')
+		  AND COALESCE(a.attachment_state, '') IN ('pending', 'skipped', 'failed', 'unavailable')
+		ORDER BY a.id`), messageID)
+	if err != nil {
+		return nil, fmt.Errorf("list uncaptured message audio: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var o MessageMediaOccurrence
+		if err := rows.Scan(&o.AttachmentID, &o.Filename, &o.Size); err != nil {
+			return nil, fmt.Errorf("scan uncaptured message audio: %w", err)
+		}
+		occurrences = append(occurrences, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate uncaptured message audio: %w", err)
+	}
+	return occurrences, nil
+}
+
 // RevokeStaleBeeperMediaMappings moves non-revoked mappings without a current
 // live source attachment into the revoked state.
 func (s *Store) RevokeStaleBeeperMediaMappings(ctx context.Context, destination string) error {

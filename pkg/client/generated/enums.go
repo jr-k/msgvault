@@ -1008,6 +1008,45 @@ func (m MeetingScopeRequestDeletion) Validate() error {
 	}
 }
 
+type MessageRecordingState string
+
+const (
+	MediaMissing                MessageRecordingState = "media_missing"
+	MessageRecordingStateFailed MessageRecordingState = "failed"
+	MessageRecordingStateReady  MessageRecordingState = "ready"
+	Missing                     MessageRecordingState = "missing"
+	Processing                  MessageRecordingState = "processing"
+	Unavailable                 MessageRecordingState = "unavailable"
+	Unsupported                 MessageRecordingState = "unsupported"
+)
+
+// Validate checks if the MessageRecordingState value is valid
+func (m MessageRecordingState) Validate() error {
+	switch m {
+	case MediaMissing, MessageRecordingStateFailed, MessageRecordingStateReady, Missing, Processing, Unavailable, Unsupported:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid MessageRecordingState value, got: %v", m))
+	}
+}
+
+type MessageTranscriptOrigin string
+
+const (
+	Generated MessageTranscriptOrigin = "generated"
+	Supplied  MessageTranscriptOrigin = "supplied"
+)
+
+// Validate checks if the MessageTranscriptOrigin value is valid
+func (m MessageTranscriptOrigin) Validate() error {
+	switch m {
+	case Generated, Supplied:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid MessageTranscriptOrigin value, got: %v", m))
+	}
+}
+
 type NetworkEdgeKind string
 
 const (
@@ -1045,14 +1084,14 @@ func (n NetworkNodeKind) Validate() error {
 type OperationLaneStatusHistoryAvailability string
 
 const (
-	Available   OperationLaneStatusHistoryAvailability = "available"
-	Unavailable OperationLaneStatusHistoryAvailability = "unavailable"
+	Available                                         OperationLaneStatusHistoryAvailability = "available"
+	OperationLaneStatusHistoryAvailabilityUnavailable OperationLaneStatusHistoryAvailability = "unavailable"
 )
 
 // Validate checks if the OperationLaneStatusHistoryAvailability value is valid
 func (o OperationLaneStatusHistoryAvailability) Validate() error {
 	switch o {
-	case Available, Unavailable:
+	case Available, OperationLaneStatusHistoryAvailabilityUnavailable:
 		return nil
 	default:
 		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid OperationLaneStatusHistoryAvailability value, got: %v", o))
