@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"strconv"
@@ -11,6 +12,8 @@ import (
 	"go.kenn.io/msgvault/internal/api"
 	imaplib "go.kenn.io/msgvault/internal/imap"
 	"go.kenn.io/msgvault/internal/sourceops"
+	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/textutil"
 )
 
 type draftComposeIntent struct {
@@ -27,6 +30,8 @@ type draftComposeIntent struct {
 	// ConversationID selects a local chat draft instead of an IMAP draft.
 	ConversationID int64
 	ReplyTo        int64
+	// PersonID limits --to to the person's archived email addresses.
+	PersonID int64
 }
 
 func invalidDraftComposeArgs(format string, args ...any) (draftComposeIntent, error) {
@@ -49,7 +54,7 @@ func parseDraftComposeArgs(args []string) (draftComposeIntent, error) {
 		}
 		name, value, hasValue := strings.Cut(nameValue, "=")
 		switch name {
-		case draftFromFlag, "account", "source-id", "subject", "body", "to", "cc", "bcc", "conversation", "reply-to":
+		case draftFromFlag, "account", "source-id", "subject", "body", "to", "cc", "bcc", "conversation", "reply-to", "person-id":
 			if !hasValue {
 				if len(rest) == 0 {
 					return invalidDraftComposeArgs("--%s requires a value", name)
@@ -79,14 +84,17 @@ func parseDraftComposeArgs(args []string) (draftComposeIntent, error) {
 					return invalidDraftComposeArgs("source ID must be a positive integer")
 				}
 				intent.SourceID, intent.SourceIDSet, sourceIDSet = id, true, true
-			case "conversation", "reply-to":
+			case "conversation", "reply-to", "person-id":
 				id, parseErr := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
 				if parseErr != nil || id <= 0 {
 					return invalidDraftComposeArgs("--%s must be a positive integer", name)
 				}
 				target := &intent.ReplyTo
-				if name == "conversation" {
+				switch name {
+				case "conversation":
 					target = &intent.ConversationID
+				case "person-id":
+					target = &intent.PersonID
 				}
 				if *target != 0 {
 					return invalidDraftComposeArgs("--%s given more than once", name)
@@ -132,13 +140,24 @@ func parseDraftComposeArgs(args []string) (draftComposeIntent, error) {
 		}
 	}
 	if intent.ConversationID != 0 {
-		if fromSet || accountSet || sourceIDSet || subjectSet || len(intent.To)+len(intent.Cc)+len(intent.Bcc) > 0 {
+		if intent.PersonID != 0 || fromSet || accountSet || sourceIDSet || subjectSet || len(intent.To)+len(intent.Cc)+len(intent.Bcc) > 0 {
 			return invalidDraftComposeArgs("--conversation accepts only --body, --reply-to, and --json")
 		}
 		return intent, nil
 	}
 	if intent.ReplyTo != 0 {
 		return invalidDraftComposeArgs("--reply-to requires --conversation")
+	}
+	if intent.PersonID != 0 {
+		if len(intent.To)+len(intent.Cc)+len(intent.Bcc) == 0 {
+			if fromSet || accountSet || sourceIDSet || subjectSet || bodySet {
+				return invalidDraftComposeArgs("--person-id without --to accepts only --json")
+			}
+			return intent, nil
+		}
+		if len(intent.To) != 1 {
+			return invalidDraftComposeArgs("--person-id requires exactly one --to")
+		}
 	}
 	if !accountSet && !sourceIDSet {
 		return invalidDraftComposeArgs("--account or --source-id is required")
@@ -164,12 +183,30 @@ func (a *storeAPIAdapter) runCLIComposeDraft(
 	if err != nil {
 		return err
 	}
+	if intent.PersonID != 0 {
+		if req.Grant != nil {
+			return draftReplyNotPermitted(errors.New("contact-directed drafts are owner-only"))
+		}
+		rows, eligible, err := a.personDraftAddresses(ctx, intent.PersonID)
+		if err != nil {
+			return err
+		}
+		if len(intent.To) == 0 {
+			return emitPersonDraftAddresses(emit, intent.JSON, intent.PersonID, rows)
+		}
+		if _, key, err := parseDraftSender(intent.To[0]); err != nil || !eligible[key] {
+			return draftReplyError("invalid_compose_metadata", errors.New("--to is not one of the person's archived email addresses"))
+		}
+	}
 	if intent.ConversationID != 0 {
 		return a.runCLIChatDraftCreate(ctx, intent, req.Grant, emit)
 	}
 	if source, err := sourceops.ResolveExactOne(a.store, sourceops.Selector{
 		Account: intent.Account, SourceID: intent.SourceID, SourceIDSet: intent.SourceIDSet,
 	}); err == nil && source.SourceType == "beeper" {
+		if intent.PersonID != 0 {
+			return draftReplyError("draft_disabled", errors.New("contact-directed drafts require an IMAP source"))
+		}
 		return a.runBeeperDraftCreate(ctx, req.Grant, intent, source, emit)
 	}
 	target, from, _, err := a.resolveDraftTarget(
@@ -186,4 +223,91 @@ func (a *storeAPIAdapter) runCLIComposeDraft(
 		return draftReplyError("invalid_compose_metadata", err)
 	}
 	return a.createDraft(ctx, target, draft, intent.JSON, emit)
+}
+
+// personDraftAddress is one archived identity of a person. Only email
+// addresses are supported draft destinations.
+type personDraftAddress struct {
+	Kind      string `json:"kind"`
+	Value     string `json:"value"`
+	Supported bool   `json:"supported"`
+}
+
+type personDraftAddressesOutput struct {
+	PersonID  int64                `json:"person_id"`
+	Addresses []personDraftAddress `json:"addresses"`
+}
+
+// personDraftAddresses lists the archived participant identities currently
+// bound to the person and returns the normalized keys of the supported email
+// addresses. Curated contact points and postal addresses are not archived
+// participant identities, so they never appear here.
+func (a *storeAPIAdapter) personDraftAddresses(
+	ctx context.Context, personID int64,
+) ([]personDraftAddress, map[string]bool, error) {
+	person, err := a.store.GetPersonContext(ctx, personID)
+	if errors.Is(err, store.ErrPersonNotFound) {
+		return nil, nil, draftReplyError("invalid_args", fmt.Errorf("person %d not found", personID))
+	}
+	if err != nil {
+		return nil, nil, draftReplyError("draft_read_failed", fmt.Errorf("load person %d: %w", personID, err))
+	}
+	identity, err := a.store.GetParticipantIdentityContext(ctx, person.ParticipantIDs)
+	if err != nil {
+		return nil, nil, draftReplyError("draft_read_failed", fmt.Errorf("load identities for person %d: %w", personID, err))
+	}
+	rows := make([]personDraftAddress, 0)
+	eligible := make(map[string]bool)
+	unsupported := make(map[[2]string]bool)
+	add := func(kind, value string) {
+		if strings.TrimSpace(value) == "" {
+			return
+		}
+		if kind == "email" {
+			if address, key, err := parseDraftSender(value); err == nil {
+				if !eligible[key] {
+					eligible[key] = true
+					rows = append(rows, personDraftAddress{Kind: kind, Value: address.Address, Supported: true})
+				}
+				return
+			}
+		}
+		key := [2]string{kind, strings.ToLower(value)}
+		if !unsupported[key] {
+			unsupported[key] = true
+			rows = append(rows, personDraftAddress{Kind: kind, Value: value})
+		}
+	}
+	for _, member := range identity.Members {
+		add("email", member.Email)
+		add("phone", member.Phone)
+	}
+	for _, identifier := range identity.Identifiers {
+		add(identifier.Type, identifier.Value)
+	}
+	return rows, eligible, nil
+}
+
+func emitPersonDraftAddresses(
+	emit func(api.CLIRunEvent) error, asJSON bool, personID int64, rows []personDraftAddress,
+) error {
+	if emit == nil {
+		return nil
+	}
+	if asJSON {
+		data, err := jsonv2.Marshal(personDraftAddressesOutput{PersonID: personID, Addresses: rows})
+		if err != nil {
+			return draftReplyError("output_failed", err)
+		}
+		return emit(api.CLIRunEvent{Type: cliStreamStdout, Data: string(data) + "\n"})
+	}
+	var data strings.Builder
+	for _, row := range rows {
+		support := "unsupported"
+		if row.Supported {
+			support = "supported"
+		}
+		fmt.Fprintf(&data, "%s\t%s\t%s\n", textutil.SanitizeTerminal(row.Kind), textutil.SanitizeTerminal(row.Value), support)
+	}
+	return emit(api.CLIRunEvent{Type: cliStreamStdout, Data: data.String()})
 }

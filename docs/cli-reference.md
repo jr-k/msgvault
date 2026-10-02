@@ -302,6 +302,33 @@ structured provider outcomes as `draft-reply`. It stores the Bcc envelope in
 the draft so the mail application can use it. It never sends the message or
 validates provider send-as rights.
 
+### Draft to a person
+
+`--person-id <id>` addresses a draft to one of a person's archived email
+addresses. Person IDs come from `msgvault person list`, `person directory`, or
+`person search`.
+
+1. Run `draft-compose --person-id <id>`, optionally with `--json`, to list the
+   archived identities of the person's participants. Email addresses are
+   `supported`; phone numbers and chat identifiers are `unsupported`. Curated
+   contact points and postal addresses are not listed.
+2. Run `draft-compose --person-id <id>` again with exactly one `--to` from that
+   list and the required `--account` or `--source-id` to create the IMAP draft.
+
+```bash
+msgvault draft-compose --person-id 7
+msgvault draft-compose --person-id 7 --account you@example.com \
+  --to alice@example.com --subject 'Hi' --body 'Draft text'
+```
+
+Any other `--to` fails with `invalid_compose_metadata`; an unknown or
+merged-away person fails with `invalid_args`. The list follows current person
+merges and splits, so an address listed before a split can be rejected after
+it. `--cc` and `--bcc` behave as in any other draft. Sender, source, and draft
+policy checks are unchanged. `--person-id` is owner-only: a delegated agent
+token gets `not_permitted`. It does not apply to Beeper or local chat drafts.
+Listing waits for a running operation like any other `draft-compose` call.
+
 ### Beeper chat drafts
 
 For a Beeper source, `draft-compose` leaves a text draft in the composer of an
