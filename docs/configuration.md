@@ -1478,8 +1478,8 @@ ownership and permission checks to the target directory.
 
 `msgvault serve` sends anonymous usage telemetry to PostHog: a `daemon_active`
 event when the daemon starts and every 24 hours while it runs, and an
-`app_opened` event when the web UI opens and on its first focus each later UTC
-day. The browser reports `app_opened` to the daemon, never to PostHog. Each
+`app_opened` event at most once per UTC day per browser, when the web UI opens or
+on its first focus that day. The browser reports `app_opened` to the daemon, never to PostHog. Each
 event carries only:
 
 - the product name and source (`msgvault`, `daemon`)

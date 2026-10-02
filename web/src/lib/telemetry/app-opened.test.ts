@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createSessionAwareAPIClient } from '../api/client';
-import { createAppOpenedReporter } from './app-opened';
+import { APP_OPENED_DAY_KEY, createAppOpenedReporter } from './app-opened';
 
 function settle(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve));
@@ -16,6 +16,7 @@ describe('app_opened reporter', () => {
     fetchMock = vi.fn<typeof fetch>(async () => Response.json({ status: 'disabled' }, { status: 202 }));
     client = createSessionAwareAPIClient(fetchMock, () => 'csrf-token');
     stops = [];
+    localStorage.clear();
   });
 
   afterEach(() => {
@@ -86,6 +87,36 @@ describe('app_opened reporter', () => {
     start(reporter);
     await settle();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('sends nothing from another tab or a reload the same UTC day', async () => {
+    vi.setSystemTime(new Date('2026-10-02T08:00:00Z'));
+    start();
+    start(createAppOpenedReporter());
+    focusAt('2026-10-02T21:00:00Z');
+    await settle();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(localStorage.getItem(APP_OPENED_DAY_KEY)).toBe('2026-10-02');
+  });
+
+  it('falls back to once per tab per day when storage throws', async () => {
+    const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new DOMException('denied', 'SecurityError');
+    });
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('denied', 'SecurityError');
+    });
+    try {
+      vi.setSystemTime(new Date('2026-10-02T08:00:00Z'));
+      start();
+      focusAt('2026-10-02T09:00:00Z');
+      focusAt('2026-10-03T09:00:00Z');
+      await settle();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      getItem.mockRestore();
+      setItem.mockRestore();
+    }
   });
 
   it('swallows a failed post and still reports the next day', async () => {
