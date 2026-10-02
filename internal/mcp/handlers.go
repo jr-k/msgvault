@@ -483,6 +483,7 @@ type SimilarSearcher interface {
 }
 
 type SimilarSearchRequest struct {
+	AccountScopes []search.AccountScope
 	MessageID     int64
 	Limit         int
 	Account       string
@@ -619,32 +620,6 @@ func translateVectorErr(err error) *toolResult {
 	return nil
 }
 
-// getAccountID looks up a source ID by email address.
-// Returns nil if account is empty (no filter), or an error if not found.
-func (h *handlers) getAccountID(ctx context.Context, account string) (*int64, error) {
-	if account == "" {
-		return nil, nil //nolint:nilnil // empty input -> no filter, not an error
-	}
-	accounts, err := h.engine.ListAccounts(ctx)
-	if err != nil {
-		return nil, newInternalError("list accounts", err)
-	}
-	var matched *int64
-	for _, acc := range accounts {
-		if acc.Identifier == account {
-			if matched != nil {
-				return nil, &expectedHandlerError{message: "account matches multiple sources: " + account}
-			}
-			id := acc.ID
-			matched = &id
-		}
-	}
-	if matched != nil {
-		return matched, nil
-	}
-	return nil, &expectedHandlerError{message: "account not found: " + account}
-}
-
 // getIDArg extracts a required positive integer ID from the arguments map.
 func getIDArg(args map[string]any, key string) (int64, error) {
 	v, ok := args[key].(float64)
@@ -719,7 +694,7 @@ func (h *handlers) searchMetadata(ctx context.Context, req toolRequest) (*toolRe
 	offset := limitArg(args, toolArgOffset, 0)
 
 	account, _ := args[toolArgAccount].(string)
-	sourceID, err := h.getAccountID(ctx, account)
+	sourceID, accountScopes, err := h.resolveAccountScope(ctx, account)
 	if err != nil {
 		return dependencyError("resolve metadata-search account", err)
 	}
@@ -728,7 +703,7 @@ func (h *handlers) searchMetadata(ctx context.Context, req toolRequest) (*toolRe
 		q.AccountIDs = []int64{*sourceID}
 	}
 
-	filter := query.MessageFilter{SourceID: sourceID}
+	filter := query.MessageFilter{SourceID: sourceID, AccountScopes: accountScopes}
 
 	results, err := h.engine.SearchFast(ctx, q, filter, limit, offset)
 	if err != nil {
@@ -896,7 +871,7 @@ func (h *handlers) searchMessageBodies(ctx context.Context, req toolRequest) (*t
 	offset := limitArg(args, toolArgOffset, 0)
 
 	account, _ := args[toolArgAccount].(string)
-	sourceID, err := h.getAccountID(ctx, account)
+	sourceID, accountScopes, err := h.resolveAccountScope(ctx, account)
 	if err != nil {
 		return dependencyError("resolve body-search account", err)
 	}
@@ -904,6 +879,8 @@ func (h *handlers) searchMessageBodies(ctx context.Context, req toolRequest) (*t
 	if sourceID != nil {
 		q.AccountIDs = []int64{*sourceID}
 	}
+
+	q.AccountScopes = append(q.AccountScopes, search.CloneAccountScopes(accountScopes)...)
 
 	if len(q.TextTerms) == 0 {
 		return toolErrorResult(
@@ -1043,7 +1020,7 @@ func (h *handlers) searchMessageBodiesHybrid(
 
 	// Resolve account filter to a source ID for the structured Filter.
 	account, _ := args[toolArgAccount].(string)
-	sourceID, err := h.getAccountID(ctx, account)
+	sourceID, accountScopes, err := h.resolveAccountScope(ctx, account)
 	if err != nil {
 		return dependencyError("resolve semantic-search account", err)
 	}
@@ -1072,6 +1049,8 @@ func (h *handlers) searchMessageBodiesHybrid(
 	if err != nil {
 		return nil, newInternalError("build semantic-search filter", err)
 	}
+	filter.AccountScopes = append(filter.AccountScopes, search.CloneAccountScopes(accountScopes)...)
+
 	if sourceID != nil {
 		filter.SourceIDs = []int64{*sourceID}
 	}
@@ -1399,6 +1378,17 @@ func (h *handlers) findSimilarMessagesViaSearcher(ctx context.Context, req toolR
 		limit = maxPage
 	}
 	account, _ := args[toolArgAccount].(string)
+	var accountScopes []search.AccountScope
+	if account != "" && h.engine != nil {
+		_, scopes, err := h.resolveAccountScope(ctx, account)
+		if err != nil {
+			return dependencyError("resolve similar-search account", err)
+		}
+		accountScopes = scopes
+		if len(scopes) > 0 {
+			account = ""
+		}
+	}
 	messageType, _ := args["message_type"].(string)
 	after, err := getDateArg(args, toolArgAfter)
 	if err != nil {
@@ -1415,6 +1405,7 @@ func (h *handlers) findSimilarMessagesViaSearcher(ctx context.Context, req toolR
 
 	result, err := h.similarSearcher.FindSimilar(ctx, SimilarSearchRequest{
 		MessageID:     seedID,
+		AccountScopes: accountScopes,
 		Limit:         limit,
 		Account:       account,
 		MessageType:   messageType,
@@ -1450,10 +1441,12 @@ func (h *handlers) filterFromFindSimilarArgs(ctx context.Context, args map[strin
 	var f vector.Filter
 
 	account, _ := args[toolArgAccount].(string)
-	srcID, err := h.getAccountID(ctx, account)
+	srcID, accountScopes, err := h.resolveAccountScope(ctx, account)
 	if err != nil {
 		return f, err
 	}
+	f.AccountScopes = search.CloneAccountScopes(accountScopes)
+
 	if srcID != nil {
 		f.SourceIDs = []int64{*srcID}
 	}
@@ -2008,13 +2001,14 @@ func (h *handlers) listMessages(ctx context.Context, req toolRequest) (*toolResu
 
 	// Look up account filter
 	account, _ := args[toolArgAccount].(string)
-	sourceID, err := h.getAccountID(ctx, account)
+	sourceID, accountScopes, err := h.resolveAccountScope(ctx, account)
 	if err != nil {
 		return dependencyError("resolve message-list account", err)
 	}
 
 	filter := query.MessageFilter{
-		SourceID: sourceID,
+		SourceID:      sourceID,
+		AccountScopes: accountScopes,
 		Pagination: query.Pagination{
 			Limit:  listLimitArg(args) + 1,
 			Offset: limitArg(args, toolArgOffset, 0),
@@ -2073,8 +2067,18 @@ type getStatsResponse struct {
 	VectorSearch *vector.StatsView   `json:"vector_search,omitzero"`
 }
 
-func (h *handlers) getStats(ctx context.Context, _ toolRequest) (*toolResult, error) {
-	stats, err := h.engine.GetTotalStats(ctx, query.StatsOptions{})
+func (h *handlers) getStats(ctx context.Context, req toolRequest) (*toolResult, error) {
+	account, _ := req.GetArguments()[toolArgAccount].(string)
+	sourceID, scopes, err := h.resolveAccountScope(ctx, account)
+	if err != nil {
+		return dependencyError("resolve statistics account", err)
+	}
+	opts := query.StatsOptions{SourceID: sourceID}
+	if len(scopes) > 0 {
+		opts.Filter = &query.MessageFilter{SourceID: sourceID, AccountScopes: scopes}
+		opts.SearchScope = true
+	}
+	stats, err := h.engine.GetTotalStats(ctx, opts)
 	if err != nil {
 		return nil, newInternalError("load archive statistics", err)
 	}
@@ -2106,14 +2110,15 @@ func (h *handlers) aggregate(ctx context.Context, req toolRequest) (*toolResult,
 
 	// Look up account filter
 	account, _ := args[toolArgAccount].(string)
-	sourceID, err := h.getAccountID(ctx, account)
+	sourceID, accountScopes, err := h.resolveAccountScope(ctx, account)
 	if err != nil {
 		return dependencyError("resolve aggregate account", err)
 	}
 
 	opts := query.AggregateOptions{
-		SourceID: sourceID,
-		Limit:    limitArg(args, toolArgLimit, 50),
+		SourceID:      sourceID,
+		AccountScopes: accountScopes,
+		Limit:         limitArg(args, toolArgLimit, 50),
 	}
 
 	if opts.After, err = getDateArg(args, toolArgAfter); err != nil {
@@ -2257,7 +2262,7 @@ func (h *handlers) stageDeletion(ctx context.Context, req toolRequest) (*toolRes
 
 	// Look up account filter
 	account, _ := args[toolArgAccount].(string)
-	sourceID, err := h.getAccountID(ctx, account)
+	sourceID, accountScopes, err := h.resolveAccountScope(ctx, account)
 	if err != nil {
 		return dependencyError("resolve deletion account", err)
 	}
@@ -2316,6 +2321,7 @@ func (h *handlers) stageDeletion(ctx context.Context, req toolRequest) (*toolRes
 		if sourceID != nil {
 			q.AccountIDs = []int64{*sourceID}
 		}
+		q.AccountScopes = append(q.AccountScopes, search.CloneAccountScopes(accountScopes)...)
 
 		// Try fast search first
 		filter := query.MessageFilter{SourceID: sourceID}
@@ -2355,6 +2361,7 @@ func (h *handlers) stageDeletion(ctx context.Context, req toolRequest) (*toolRes
 	} else {
 		// Structured filter
 		filter := query.MessageFilter{
+			AccountScopes:       search.CloneAccountScopes(accountScopes),
 			SourceID:            sourceID,
 			Sender:              fromStr,
 			Domain:              domainStr,

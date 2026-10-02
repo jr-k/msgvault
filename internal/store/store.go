@@ -892,6 +892,11 @@ func (s *Store) withTxOptionsContext(
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	if s.syncGeneration != nil && (opts == nil || !opts.ReadOnly) {
+		// Match maintenance lock order before the generation fence touches sync_runs.
+		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
 		if err := s.fenceSyncGenerationTx(ctx, tx); err != nil {
 			_ = tx.Rollback()
 			return err
@@ -1552,6 +1557,9 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 	}
 	if err := s.runOnceMigration(ctx, migrationCardDAVMultipleAccounts, 1, false, s.ensureCardDAVMultiAccountSchema); err != nil {
 		return fmt.Errorf("migrate CardDAV connections: %w", err)
+	}
+	if err := s.ensureAccountAttributionSchema(ctx); err != nil {
+		return err
 	}
 	if err := s.ensureCacheSourceAttribution(ctx); err != nil {
 		return err
