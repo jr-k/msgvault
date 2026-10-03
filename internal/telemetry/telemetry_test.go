@@ -59,11 +59,12 @@ func TestEnabledReporterWireHelper(t *testing.T) {
 		return
 	}
 	opts := Options{DataDir: os.Getenv(wireDirEnv), Version: "test-version", Commit: "test-commit", ConfigEnabled: os.Getenv(wireConfigOffEnv) == ""}
+	require := require.New(t)
 	reporter := newReporterOrDisabled(opts, stub, slog.New(slog.NewTextHandler(os.Stdout, nil)))
-	require.True(t, reporter.EventAllowed(EventAppOpened), "an opted-out reporter keeps the allowlist")
-	require.NoError(t, reporter.Capture(EventAppOpened, map[string]any{"query": "q", "account": "a"}))
-	require.NoError(t, reporter.Capture(posthog.EventDaemonActive, nil))
-	require.NoError(t, reporter.Close())
+	require.True(reporter.EventAllowed(EventAppOpened), "an opted-out reporter keeps the allowlist")
+	require.NoError(reporter.Capture(EventAppOpened, map[string]any{"query": "q", "account": "a"}))
+	require.NoError(reporter.Capture(posthog.EventDaemonActive, nil))
+	require.NoError(reporter.Close())
 }
 
 type recordedRequest struct {
