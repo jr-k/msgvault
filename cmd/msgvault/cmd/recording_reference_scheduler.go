@@ -51,5 +51,5 @@ func configureRecordingReferenceJob(ctx context.Context, sched *scheduler.Schedu
 		return err
 	}
 	worker := recordingref.NewWorker(st, client, destination, cfg.ReferenceOrigins, logger).WithOperationGate(beeperMediaGate(gate, recordingReferenceGateLabel))
-	return sched.AddJob(scheduler.Job{Name: recordingReferenceJob, Schedule: "* * * * *", Run: func(ctx context.Context) error { _, err := worker.RunBatch(ctx); return err }})
+	return sched.AddJob(scheduler.Job{Name: recordingReferenceJob, Schedule: "* * * * *", Run: func(ctx context.Context) error { return worker.RunBatch(ctx) }})
 }

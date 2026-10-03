@@ -53,7 +53,10 @@ func parse(raw string) (*url.URL, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, errors.New("invalid recording scheme")
 	}
-	host, err := idna.Lookup.ToASCII(strings.ToLower(u.Hostname()))
+	host := strings.ToLower(u.Hostname())
+	if net.ParseIP(host) == nil {
+		host, err = idna.Lookup.ToASCII(host)
+	}
 	if err != nil || host == "" {
 		return nil, errors.New("invalid recording host")
 	}

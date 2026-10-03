@@ -43,11 +43,31 @@ func due(t *testing.T, f *storetest.Fixture) {
 func runDiscovery(t *testing.T, w *Worker, count int) {
 	t.Helper()
 	assert.Eventually(t, func() bool {
-		_, err := w.RunBatch(t.Context())
+		err := w.RunBatch(t.Context())
 		require.NoError(t, err)
 		var got int
 		require.NoError(t, w.st.DB().QueryRow(`SELECT COUNT(*) FROM recording_references`).Scan(&got))
 		return got == count
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+func waitForRecordingChange(t *testing.T, w *Worker, id int64) {
+	t.Helper()
+	assert, require := assert.New(t), require.New(t)
+	before, err := w.st.LoadRecordingReferenceCursor(t.Context(), w.destination)
+	require.NoError(err)
+	assert.Eventually(func() bool {
+		changed, err := w.st.ListChangedMessages(t.Context(), before.FeedCursor(), 200)
+		require.NoError(err)
+		require.NoError(w.RunBatch(t.Context()))
+		after, err := w.st.LoadRecordingReferenceCursor(t.Context(), w.destination)
+		require.NoError(err)
+		for _, message := range changed.Messages {
+			if message.ID == id {
+				return after.At.After(message.ContentChangedAt) || after.At.Equal(message.ContentChangedAt) && (!after.AfterRow || after.AfterID >= id)
+			}
+		}
+		return false
 	}, 5*time.Second, 10*time.Millisecond)
 }
 
@@ -86,13 +106,13 @@ func TestRecordingReferenceFeed(t *testing.T) {
 	two, err := f.Store.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: "two", MessageType: "slack"})
 	require.NoError(err)
 	recordingBody(t, f, two, "https://cap.example.test/s/two")
-	_, err = w.RunBatch(t.Context())
+	err = w.RunBatch(t.Context())
 	require.NoError(err)
 	w = NewWorker(f.Store, client, "destination", []string{"https://cap.example.test"}, nil)
 	runDiscovery(t, w, 2)
 	recordingBody(t, f, one, "recording removed")
 	assert.Eventually(func() bool {
-		_, err := w.RunBatch(t.Context())
+		err := w.RunBatch(t.Context())
 		require.NoError(err)
 		state, _, _ := recordingState(t, f, one)
 		return state == "withdrawn"
@@ -128,7 +148,7 @@ func TestRecordingReferenceFeedHTML(t *testing.T) {
 	require.NoError(err)
 	require.True(exists)
 	require.Len(messageRefs(m, nil), 1)
-	assert.Eventually(func() bool { result, err := w.RunBatch(t.Context()); require.NoError(err); return result.Examined > 0 }, 5*time.Second, 10*time.Millisecond)
+	waitForRecordingChange(t, w, id)
 	assert.Empty(requests)
 }
 
@@ -172,10 +192,12 @@ func TestRecordingReferenceBackfill(t *testing.T) {
 	_, err := f.Store.DB().Exec(`UPDATE messages SET content_changed_at='2000-01-01 00:00:00.000'`)
 	require.NoError(err)
 	client := recordingClient(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
-	result, err := NewWorker(f.Store, client, "destination", nil, nil).RunBatch(t.Context())
+	err = NewWorker(f.Store, client, "destination", nil, nil).RunBatch(t.Context())
 	require.NoError(err)
-	assert.Equal(405, result.Examined)
-	assert.Equal(3, result.Pages)
+	cursor, err := f.Store.LoadRecordingReferenceCursor(t.Context(), "destination")
+	require.NoError(err)
+	assert.True(cursor.At.After(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)))
+	assert.False(cursor.AfterRow)
 	var count int
 	require.NoError(f.Store.DB().QueryRow(`SELECT COUNT(*) FROM recording_references`).Scan(&count))
 	assert.Equal(405, count)
@@ -215,14 +237,14 @@ func TestRecordingReferenceDelivery(t *testing.T) {
 		_, err = f.Store.DB().Exec(f.Store.Rebind(`UPDATE messages SET deleted_at=? WHERE id=?`), "2000-01-01 00:00:00.000", id)
 		require.NoError(err)
 		w := NewWorker(f.Store, client, "destination", nil, nil)
-		_, err = w.RunBatch(t.Context())
+		err = w.RunBatch(t.Context())
 		require.NoError(err)
 		assert.Zero(requests)
 		state, _, _ := recordingState(t, f, id)
 		assert.Equal("withdrawn", state)
 		_, err = f.Store.DB().Exec(f.Store.Rebind(`UPDATE messages SET deleted_at=NULL WHERE id=?`), id)
 		require.NoError(err)
-		assert.Eventually(func() bool { _, err := w.RunBatch(t.Context()); require.NoError(err); return requests == 1 }, 5*time.Second, 10*time.Millisecond)
+		assert.Eventually(func() bool { err := w.RunBatch(t.Context()); require.NoError(err); return requests == 1 }, 5*time.Second, 10*time.Millisecond)
 	})
 	for _, tc := range []struct {
 		name        string
@@ -272,7 +294,7 @@ func TestRecordingReferenceDelivery(t *testing.T) {
 			assert.Equal(tc.code, code)
 			if tc.name == "capability" {
 				due(t, f)
-				_, err := w.RunBatch(t.Context())
+				err := w.RunBatch(t.Context())
 				require.NoError(err)
 				claims, err := f.Store.ClaimRecordingReferences(t.Context(), "destination", time.Now().Add(time.Hour), 20)
 				require.NoError(err)
@@ -283,7 +305,7 @@ func TestRecordingReferenceDelivery(t *testing.T) {
 			status = 200
 			require.NoError(f.Store.ReconsiderBlockedRecordingReferences(t.Context(), "destination"))
 			due(t, f)
-			_, err := w.RunBatch(t.Context())
+			err := w.RunBatch(t.Context())
 			require.NoError(err)
 			state, code, after := recordingState(t, f, id)
 			assert.Equal("retained", state)
@@ -296,7 +318,7 @@ func TestRecordingReferenceDelivery(t *testing.T) {
 			assert.Equal(requests[0], requests[len(requests)-1])
 			recordingBody(t, f, id, "https://loom.com/share/abc?token=two")
 			assert.Eventually(func() bool {
-				_, err := w.RunBatch(t.Context())
+				err := w.RunBatch(t.Context())
 				require.NoError(err)
 				_, _, after := recordingState(t, f, id)
 				return after != operation
@@ -362,7 +384,7 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 				recordingBody(t, f, id, "https://loom.com/share/abc?token=new")
 			}
 			due(t, f)
-			_, err = worker.RunBatch(t.Context())
+			err = worker.RunBatch(t.Context())
 			require.NoError(err)
 			require.Len(gets, 1)
 			assert.Equal("/api/v1/media/operations/"+oldOperation, <-gets)
@@ -438,7 +460,7 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 		_, err = f.Store.DB().Exec(`UPDATE recording_references SET last_send_at='2000-01-01 00:00:00.000'`)
 		require.NoError(err)
 		due(t, f)
-		_, err = worker.RunBatch(t.Context())
+		err = worker.RunBatch(t.Context())
 		require.NoError(err)
 		state, code, current := recordingState(t, f, id)
 		assert.Equal("uncertain", state)
@@ -446,7 +468,7 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 		assert.Equal(op, current)
 		recordingBody(t, f, id, "https://loom.com/share/abc?token=new")
 		due(t, f)
-		_, err = worker.RunBatch(t.Context())
+		err = worker.RunBatch(t.Context())
 		require.NoError(err)
 		state, code, current = recordingState(t, f, id)
 		assert.Equal("uncertain", state)
@@ -459,7 +481,7 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 		t.Setenv("MSGVAULT_REFERENCE_TEST_KEY", "new-key")
 		failReceipt.Store(true)
 		due(t, f)
-		_, err = worker.RunBatch(t.Context())
+		err = worker.RunBatch(t.Context())
 		require.NoError(err)
 		state, code, current = recordingState(t, f, id)
 		assert.Equal("uncertain", state)
@@ -470,7 +492,7 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 		require.Len(claims, 1)
 		assert.Equal(lastSend, claims[0].LastSendAt)
 		due(t, f)
-		_, err = worker.RunBatch(t.Context())
+		err = worker.RunBatch(t.Context())
 		require.NoError(err)
 		require.Len(gets, 3)
 		assert.Equal("/api/v1/media/operations/"+op, <-gets)
@@ -480,7 +502,7 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 		assert.Equal("pending", state)
 		assert.NotEqual(op, current)
 		due(t, f)
-		_, err = worker.RunBatch(t.Context())
+		err = worker.RunBatch(t.Context())
 		require.NoError(err)
 		state, _, current = recordingState(t, f, id)
 		assert.Equal("retained", state)
@@ -506,7 +528,7 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 		require.True(applied)
 		client := recordingClient(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
 		w := NewWorker(f.Store, client, "destination", nil, nil)
-		_, err = w.RunBatch(t.Context())
+		err = w.RunBatch(t.Context())
 		require.NoError(err)
 		state, code, op := recordingState(t, f, id)
 		assert.Equal("uncertain", state)
@@ -520,7 +542,7 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 		require.NoError(err)
 		w.client = missingKey
 		due(t, f)
-		_, err = w.RunBatch(t.Context())
+		err = w.RunBatch(t.Context())
 		require.NoError(err)
 		state, code, _ = recordingState(t, f, id)
 		assert.Equal("uncertain", state)
@@ -535,7 +557,7 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 			assert.Equal(http.MethodGet, r.Method)
 			writeReceipt(w, op)
 		})
-		_, err = w.RunBatch(t.Context())
+		err = w.RunBatch(t.Context())
 		require.NoError(err)
 		state, code, _ = recordingState(t, f, id)
 		assert.Equal("withdrawn", state)
@@ -618,7 +640,7 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 			}
 			lose = false
 			due(t, f)
-			_, err := w.RunBatch(t.Context())
+			err := w.RunBatch(t.Context())
 			require.NoError(err)
 			state, code, after := recordingState(t, f, id)
 			assert.Equal(tc.want, state)
@@ -633,7 +655,7 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 					require.Len(claims, 1)
 					sent := claims[0].LastSendAt
 					due(t, f)
-					_, err = w.RunBatch(t.Context())
+					err = w.RunBatch(t.Context())
 					require.NoError(err)
 					state, code, _ = recordingState(t, f, id)
 					assert.Equal("uncertain", state)
@@ -645,13 +667,13 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 					_, err = f.Store.DB().Exec(`UPDATE recording_references SET last_send_at='2000-01-01 00:00:00.000'`)
 					require.NoError(err)
 					due(t, f)
-					_, err = w.RunBatch(t.Context())
+					err = w.RunBatch(t.Context())
 					require.NoError(err)
 					state, code, _ = recordingState(t, f, id)
 					assert.Equal("pending", state)
 					assert.Equal("receipt_not_found", code)
 					accept.Store(true)
-					_, err = w.RunBatch(t.Context())
+					err = w.RunBatch(t.Context())
 					require.NoError(err)
 					state, code, after = recordingState(t, f, id)
 					assert.Equal("retained", state)
@@ -680,7 +702,7 @@ func TestRecordingReferenceSecrets(t *testing.T) {
 	w := NewWorker(f.Store, client, "destination", []string{"https://cap.example.test"}, slog.New(slog.NewTextHandler(&logs, nil)))
 	runDiscovery(t, w, 1)
 	var row string
-	require.NoError(f.Store.DB().QueryRow(`SELECT route_key || kind || origin || ref_sha256 || operation_id || occurrence_json || state || error_code || source_id || occurrence_id || outcome || coverage_state FROM recording_references`).Scan(&row))
+	require.NoError(f.Store.DB().QueryRow(`SELECT route_key || ref_sha256 || operation_id || occurrence_json || state || error_code || source_id || occurrence_id || outcome || coverage_state FROM recording_references`).Scan(&row))
 	for _, secret := range []string{"path_secret", "query_secret", "fragment_secret"} {
 		assert.NotContains(row, secret)
 		assert.NotContains(logs.String(), secret)
@@ -736,11 +758,7 @@ func TestRecordingReferenceOccurrenceCorrection(t *testing.T) {
 				}
 				_, err := f.Store.DB().Exec(f.Store.Rebind(`UPDATE messages SET `+field+`=? WHERE id=?`), value, id)
 				require.NoError(err)
-				assert.Eventually(func() bool {
-					result, err := worker.RunBatch(t.Context())
-					require.NoError(err)
-					return result.Examined > 0
-				}, 5*time.Second, 10*time.Millisecond)
+				waitForRecordingChange(t, worker, id)
 				if settlement != "retained" {
 					state, _, op := recordingState(t, f, id)
 					assert.Equal("uncertain", state)
@@ -750,13 +768,13 @@ func TestRecordingReferenceOccurrenceCorrection(t *testing.T) {
 						ready.Store(true)
 					}
 					due(t, f)
-					_, err = worker.RunBatch(t.Context())
+					err = worker.RunBatch(t.Context())
 					require.NoError(err)
 					if settlement == "receipt" {
 						require.Len(requests, 1)
 						assert.Equal(original, <-requests)
 						due(t, f)
-						_, err = worker.RunBatch(t.Context())
+						err = worker.RunBatch(t.Context())
 						require.NoError(err)
 						require.Len(gets, 1)
 						assert.Equal("/api/v1/media/operations/"+original.OperationID, <-gets)
@@ -767,7 +785,7 @@ func TestRecordingReferenceOccurrenceCorrection(t *testing.T) {
 					state, _, op = recordingState(t, f, id)
 					assert.Equal("pending", state)
 					assert.NotEqual(original.OperationID, op)
-					_, err = worker.RunBatch(t.Context())
+					err = worker.RunBatch(t.Context())
 					require.NoError(err)
 				}
 				require.Len(requests, 1)
@@ -782,7 +800,7 @@ func TestRecordingReferenceOccurrenceCorrection(t *testing.T) {
 					assert.NotEqual(original.Occurrence.Ref, corrected.Occurrence.Ref)
 					assert.Equal(original.Occurrence.Revision, corrected.Occurrence.Revision)
 				}
-				_, err = worker.RunBatch(t.Context())
+				err = worker.RunBatch(t.Context())
 				require.NoError(err)
 				assert.Empty(requests)
 				assert.Empty(gets)
@@ -839,11 +857,7 @@ func TestRecordingReferenceSettlementRollback(t *testing.T) {
 			}
 			_, err := f.Store.DB().Exec(f.Store.Rebind(`UPDATE messages SET `+field+`=? WHERE id=?`), value, id)
 			require.NoError(err)
-			assert.Eventually(func() bool {
-				result, err := worker.RunBatch(t.Context())
-				require.NoError(err)
-				return result.Examined > 0
-			}, 5*time.Second, 10*time.Millisecond)
+			waitForRecordingChange(t, worker, id)
 			before, err := f.Store.LoadRecordingReferenceCursor(t.Context(), "destination")
 			require.NoError(err)
 			claims, err := f.Store.ClaimRecordingReferences(t.Context(), "destination", time.Now().Add(time.Hour), 20)
@@ -854,7 +868,7 @@ func TestRecordingReferenceSettlementRollback(t *testing.T) {
 			t.Cleanup(restore)
 			ready.Store(true)
 			due(t, f)
-			_, err = worker.RunBatch(t.Context())
+			err = worker.RunBatch(t.Context())
 			require.ErrorContains(err, "injected recording replacement failure")
 			require.Len(requests, 1)
 			assert.Equal(original, <-requests)
@@ -872,15 +886,17 @@ func TestRecordingReferenceSettlementRollback(t *testing.T) {
 			restore()
 			worker = NewWorker(f.Store, client, "destination", nil, nil)
 			due(t, f)
-			result, err := worker.RunBatch(t.Context())
+			err = worker.RunBatch(t.Context())
 			require.NoError(err)
-			assert.Zero(result.Examined)
+			remaining, err := f.Store.ListChangedMessages(t.Context(), before.FeedCursor(), 200)
+			require.NoError(err)
+			assert.Empty(remaining.Messages)
 			require.Len(requests, 1)
 			assert.Equal(original, <-requests)
 			state, _, op := recordingState(t, f, id)
 			assert.Equal("pending", state)
 			assert.NotEqual(original.OperationID, op)
-			_, err = worker.RunBatch(t.Context())
+			err = worker.RunBatch(t.Context())
 			require.NoError(err)
 			require.Len(requests, 1)
 			corrected := <-requests
@@ -890,7 +906,7 @@ func TestRecordingReferenceSettlementRollback(t *testing.T) {
 			require.NoError(err)
 			assert.False(after.At.Before(before.At))
 			assert.Equal(before.Policy, after.Policy)
-			_, err = worker.RunBatch(t.Context())
+			err = worker.RunBatch(t.Context())
 			require.NoError(err)
 			assert.Empty(requests)
 		})
@@ -935,8 +951,8 @@ func TestRecordingReferenceCorrectionDuringHTTP(t *testing.T) {
 			done := make(chan error, 1)
 			go func() {
 				for {
-					result, err := worker.RunBatch(t.Context())
-					if err != nil || result.Attempted > 0 {
+					err := worker.RunBatch(t.Context())
+					if err != nil || posts.Load() > 0 {
 						done <- err
 						return
 					}
@@ -959,11 +975,7 @@ func TestRecordingReferenceCorrectionDuringHTTP(t *testing.T) {
 			mu.Unlock()
 			require.NoError(err)
 			discovery := NewWorker(f.Store, client, "destination", nil, nil).WithOperationGate(gate)
-			assert.Eventually(func() bool {
-				result, err := discovery.RunBatch(t.Context())
-				require.NoError(err)
-				return result.Examined > 0 && result.Attempted == 0
-			}, 5*time.Second, 10*time.Millisecond)
+			waitForRecordingChange(t, discovery, id)
 			unblock()
 			select {
 			case err := <-done:
@@ -974,14 +986,17 @@ func TestRecordingReferenceCorrectionDuringHTTP(t *testing.T) {
 			state, _, op := recordingState(t, f, id)
 			assert.Equal("pending", state)
 			assert.NotEqual(original.OperationID, op)
-			result, err := discovery.RunBatch(t.Context())
+			cursor, err := f.Store.LoadRecordingReferenceCursor(t.Context(), "destination")
 			require.NoError(err)
-			assert.Zero(result.Examined)
+			remaining, err := f.Store.ListChangedMessages(t.Context(), cursor.FeedCursor(), 200)
+			require.NoError(err)
+			assert.Empty(remaining.Messages)
+			require.NoError(discovery.RunBatch(t.Context()))
 			require.Len(requests, 1)
 			corrected := <-requests
 			assert.Equal(op, corrected.OperationID)
 			assert.NotEqual(original.Occurrence.Ref, corrected.Occurrence.Ref)
-			_, err = discovery.RunBatch(t.Context())
+			err = discovery.RunBatch(t.Context())
 			require.NoError(err)
 			assert.Empty(requests)
 		})

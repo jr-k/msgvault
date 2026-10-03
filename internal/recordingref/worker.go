@@ -24,8 +24,6 @@ type Worker struct {
 	gate        func(context.Context) (func(), bool)
 }
 
-type Result struct{ Examined, Pages, Attempted int }
-
 func NewWorker(st *store.Store, client *docbankmedia.Client, destination string, origins []string, logger *slog.Logger) *Worker {
 	canonical := make([]string, 0, len(origins))
 	for _, raw := range origins {
@@ -91,7 +89,7 @@ func referenceInputs(m store.RecordingMessage, refs []Ref) ([]store.RecordingRef
 		if err != nil {
 			return nil, err
 		}
-		inputs = append(inputs, store.RecordingReferenceInput{RouteKey: r.RouteKey, Kind: string(r.Kind), Origin: r.Origin, RefSHA256: r.ReferenceSHA256(), OccurrenceJSON: string(encoded)})
+		inputs = append(inputs, store.RecordingReferenceInput{RouteKey: r.RouteKey, RefSHA256: r.ReferenceSHA256(), OccurrenceJSON: string(encoded)})
 	}
 	return inputs, nil
 }
@@ -104,11 +102,11 @@ func (w *Worker) reconcile(ctx context.Context, m store.RecordingMessage) error 
 	return w.st.ReconcileRecordingReferences(ctx, w.destination, m.ID, m.Live, inputs)
 }
 
-func (w *Worker) RunBatch(ctx context.Context) (Result, error) {
-	var result Result
+func (w *Worker) RunBatch(ctx context.Context) error {
+	var examined, pages, attempted int
 	start := time.Now()
 	policy := digest(strings.Join(w.origins, "\x00"))
-	for result.Pages < 50 && time.Since(start) < 20*time.Second {
+	for pages < 50 && time.Since(start) < 20*time.Second {
 		more := false
 		err := w.gated(ctx, func() error {
 			before, err := w.st.LoadRecordingReferenceCursor(ctx, w.destination)
@@ -133,7 +131,7 @@ func (w *Worker) RunBatch(ctx context.Context) (Result, error) {
 						return err
 					}
 				}
-				result.Examined++
+				examined++
 				cursor.At, cursor.AfterID, cursor.AfterRow = changed.ContentChangedAt, changed.ID, true
 			}
 			more = len(page.Messages) == 200
@@ -150,9 +148,9 @@ func (w *Worker) RunBatch(ctx context.Context) (Result, error) {
 			return nil
 		})
 		if err != nil {
-			return result, err
+			return err
 		}
-		result.Pages++
+		pages++
 		if !more {
 			break
 		}
@@ -163,18 +161,18 @@ func (w *Worker) RunBatch(ctx context.Context) (Result, error) {
 		claims, err = w.st.ClaimRecordingReferences(ctx, w.destination, time.Now().UTC(), 20)
 		return err
 	}); err != nil {
-		return result, err
+		return err
 	}
 	for _, claim := range claims {
 		if err := w.deliver(ctx, claim); err != nil {
-			return result, err
+			return err
 		}
-		result.Attempted++
+		attempted++
 	}
 	if w.logger != nil {
-		w.logger.Debug("Recording reference pass", "examined", result.Examined, "pages", result.Pages, "attempted", result.Attempted)
+		w.logger.Debug("Recording reference pass", "examined", examined, "pages", pages, "attempted", attempted)
 	}
-	return result, nil
+	return nil
 }
 
 func (w *Worker) deliver(ctx context.Context, claim store.RecordingReferenceClaim) error {

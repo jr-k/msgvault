@@ -19,6 +19,11 @@ func TestScan(t *testing.T) {
 		{"cap", "https://cap.so/dev/abc", nil, CapCloud, 1},
 		{"cap HTTP", "http://cap.so/s/abc http://www.cap.so/embed/abc", nil, "", 0},
 		{"registered", "https://cap.example.test/s/abc", []string{"https://CAP.EXAMPLE.TEST:443"}, CapSelfHosted, 1},
+		{"IPv4", "https://192.0.2.1:8443/s/abc", []string{"https://192.0.2.1:8443"}, CapSelfHosted, 1},
+		{"IPv6 default port", "https://[2001:db8::1]:443/s/abc", []string{"https://[2001:db8::1]"}, CapSelfHosted, 1},
+		{"IPv6 nondefault port", "https://[2001:db8::1]:8443/s/abc", []string{"https://[2001:db8::1]:8443"}, CapSelfHosted, 1},
+		{"IPv6 unlisted", "https://[2001:db8::1]:8443/s/abc", nil, "", 0},
+		{"IPv6 wrong port", "https://[2001:db8::1]:8443/s/abc", []string{"https://[2001:db8::1]"}, "", 0},
 		{"unlisted", "https://cap.example.test/s/abc", nil, "", 0},
 		{"lookalike", "https://loom.com.example.test/share/abc", nil, "", 0},
 		{"user info", "https://alice@loom.com/share/abc", nil, "", 0},
@@ -64,6 +69,34 @@ func TestTeamsPointer(t *testing.T) {
 	origin, err := CanonicalOrigin("HTTPS://EXAMPLE.TEST:443")
 	require.NoError(err)
 	assert.Equal("https://example.test", origin)
+	r, ok = TeamsPointer("teams:recording:ipv6", "https://[2001:DB8::1]:8443/play?id=secret#fragment")
+	require.True(ok)
+	assert.Equal("https://[2001:db8::1]:8443", r.Origin)
+	assert.Equal("https://[2001:db8::1]:8443/play?id=secret", r.Canonical)
+}
+
+func TestCanonicalOrigin(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{"https://192.0.2.1:443", "https://192.0.2.1"},
+		{"http://192.0.2.1:80", "http://192.0.2.1"},
+		{"https://[2001:DB8::1]", "https://[2001:db8::1]"},
+		{"https://[2001:db8::1]:443", "https://[2001:db8::1]"},
+		{"http://[2001:db8::1]:80", "http://[2001:db8::1]"},
+		{"https://[2001:db8::1]:8443", "https://[2001:db8::1]:8443"},
+		{"https://bücher.example", "https://xn--bcher-kva.example"},
+		{"https://[2001:db8::1]:0", ""},
+		{"https://[2001:db8::1]:65536", ""},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			origin, err := CanonicalOrigin(tc.raw)
+			if tc.want == "" {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, origin)
+		})
+	}
 }
 
 func TestScanHTML(t *testing.T) {
@@ -81,5 +114,10 @@ func TestScanHTML(t *testing.T) {
 			}
 		})
 	}
-	assert.Empty(t, ScanHTML(`<a href="prefix https://cap.so/s/abc">Watch</a>`, nil))
+	assert, require := assert.New(t), require.New(t)
+	assert.Empty(ScanHTML(`<a href="prefix https://cap.so/s/abc">Watch</a>`, nil))
+	refs := ScanHTML(`<a href="https://[2001:db8::1]:8443/s/abc">Watch</a>`, []string{"https://[2001:db8::1]:8443"})
+	require.Len(refs, 1)
+	assert.Equal("https://[2001:db8::1]:8443", refs[0].Origin)
+	assert.Empty(refs[0].Canonical)
 }

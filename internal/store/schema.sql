@@ -4529,8 +4529,6 @@ CREATE TABLE IF NOT EXISTS recording_references (
     destination_key TEXT NOT NULL,
     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     route_key TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    origin TEXT NOT NULL,
     ref_sha256 TEXT NOT NULL,
     operation_id TEXT NOT NULL,
     occurrence_json TEXT NOT NULL,
@@ -4543,7 +4541,6 @@ CREATE TABLE IF NOT EXISTS recording_references (
     coverage_state TEXT NOT NULL DEFAULT '',
     last_send_at DATETIME,
     retry_count INTEGER NOT NULL DEFAULT 0,
-    updated_at DATETIME NOT NULL,
     PRIMARY KEY (destination_key, message_id, route_key)
 );
 CREATE INDEX IF NOT EXISTS idx_recording_references_due

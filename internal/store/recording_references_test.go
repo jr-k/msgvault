@@ -36,7 +36,7 @@ func TestRecordingReferenceState(t *testing.T) {
 	assert, require := assert.New(t), require.New(t)
 	f := storetest.New(t)
 	id := f.CreateMessage("recording")
-	input := store.RecordingReferenceInput{RouteKey: "route", Kind: "loom", Origin: "https://loom.com", RefSHA256: "hash", OccurrenceJSON: `{"ref":"ref","revision":"revision"}`}
+	input := store.RecordingReferenceInput{RouteKey: "route", RefSHA256: "hash", OccurrenceJSON: `{"ref":"ref","revision":"revision"}`}
 	require.NoError(f.Store.ReconcileRecordingReferences(t.Context(), "destination", id, true, []store.RecordingReferenceInput{input}))
 	claims, err := f.Store.ClaimRecordingReferences(t.Context(), "destination", time.Now().Add(time.Hour), 20)
 	require.NoError(err)
@@ -83,7 +83,7 @@ func TestRecordingReferenceOccurrenceCorrection(t *testing.T) {
 			assert, require := assert.New(t), require.New(t)
 			f := storetest.New(t)
 			id := f.CreateMessage("recording")
-			input := store.RecordingReferenceInput{RouteKey: "route", Kind: "loom", Origin: "https://loom.com", RefSHA256: "hash", OccurrenceJSON: `{"ref":"original"}`}
+			input := store.RecordingReferenceInput{RouteKey: "route", RefSHA256: "hash", OccurrenceJSON: `{"ref":"original"}`}
 			require.NoError(f.Store.ReconcileRecordingReferences(t.Context(), "destination", id, true, []store.RecordingReferenceInput{input}))
 			claims, err := f.Store.ClaimRecordingReferences(t.Context(), "destination", time.Now().Add(time.Hour), 20)
 			require.NoError(err)
