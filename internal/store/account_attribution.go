@@ -242,17 +242,30 @@ func outboundEvidenceLabelSQL(l, src string) string {
 		src + ".source_type = 'gmail' AND " + l + ".source_label_id IN ('SENT', 'DRAFT')))"
 }
 
-// outboundEvidenceExistsSQL is true when message m carries a Sent or Drafts
-// label of its own source, or an IMAP membership with the \Draft flag, which
-// marks a draft even in a mailbox the server gives no Drafts role. src must be
-// m's source row.
-func outboundEvidenceExistsSQL(m, src string) string {
+// draftEvidenceSQL is true when message m is currently filed as a draft: a
+// Drafts folder role, Gmail's DRAFT label, or an IMAP membership with the
+// \Draft flag, which marks a draft even in a mailbox the server gives no
+// Drafts role. src must be m's source row.
+func draftEvidenceSQL(m, src string) string {
 	return `(EXISTS (SELECT 1 FROM message_labels ml JOIN labels l ON l.id = ml.label_id
 		WHERE ml.message_id = ` + m + `.id AND l.source_id = ` + m + `.source_id
-		  AND ` + outboundEvidenceLabelSQL("l", src) + `)
+		  AND (l.system_role = '` + LabelSystemRoleDrafts + `'
+		       OR (` + src + `.source_type = 'gmail' AND l.source_label_id = 'DRAFT')))
 		OR EXISTS (SELECT 1 FROM imap_message_memberships imm
 		WHERE imm.message_id = ` + m + `.id AND imm.source_id = ` + m + `.source_id
 		  AND LOWER(CAST(imm.flags AS TEXT)) LIKE '%"\\draft"%' ESCAPE '!'))`
+}
+
+// outboundEvidenceExistsSQL is true when message m is mail the account wrote:
+// it carries a Sent or Drafts label of its own source, the IMAP \Draft flag,
+// or messages.draft_authored, which keeps a draft snapshot written after its
+// draft evidence is gone. src must be m's source row.
+func outboundEvidenceExistsSQL(m, src string) string {
+	return `(` + m + `.draft_authored
+		OR EXISTS (SELECT 1 FROM message_labels ml JOIN labels l ON l.id = ml.label_id
+		WHERE ml.message_id = ` + m + `.id AND l.source_id = ` + m + `.source_id
+		  AND ` + outboundEvidenceLabelSQL("l", src) + `)
+		OR ` + draftEvidenceSQL(m, src) + `)`
 }
 
 // accountSink returns the mailbox a source delivers into, normalized, or ""
@@ -432,14 +445,21 @@ func (s *Store) refreshAccountAttributionTx(
 	}
 	match := matches[id]
 
-	// Drafts take the sent path: the account wrote them, so received: skips them.
-	var sent bool
+	// Drafts take the sent path: the account wrote them, so received: skips
+	// them. Draft evidence also sets draft_authored, which keeps the row
+	// written after an edit or delete retires the draft and its evidence.
+	var sent, draft, authored bool
 	if err := tx.QueryRowContext(ctx, `
-		SELECT `+outboundEvidenceExistsSQL("m", "src")+`
+		SELECT `+outboundEvidenceExistsSQL("m", "src")+`, `+draftEvidenceSQL("m", "src")+`, m.draft_authored
 		FROM messages m JOIN sources src ON src.id = m.source_id
 		WHERE m.id = ?`, id,
-	).Scan(&sent); err != nil {
+	).Scan(&sent, &draft, &authored); err != nil {
 		return malformed, fmt.Errorf("read outbound evidence for message %d: %w", id, err)
+	}
+	if draft && !authored {
+		if _, err := tx.ExecContext(ctx, `UPDATE messages SET draft_authored = TRUE WHERE id = ?`, id); err != nil {
+			return malformed, fmt.Errorf("record draft authorship of message %d: %w", id, err)
+		}
 	}
 
 	candidates, err := sourceIdentityKeysTx(ctx, tx, sourceID)
@@ -1130,4 +1150,25 @@ func (s *Store) RepairAccountAttributionContext(
 			progress(summary)
 		}
 	}
+}
+
+// backfillDraftAuthored marks rows a surviving draft record or current draft
+// evidence names as drafts, and returns any of them attributed as inbound to
+// pending so the account-attribution pass re-derives them as written. A draft
+// snapshot already retired with its evidence erased cannot be recovered.
+func (s *Store) backfillDraftAuthored(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE messages SET draft_authored = TRUE,
+			account_path = CASE WHEN account_path = '`+accountPathInbound+`' THEN NULL ELSE account_path END
+		WHERE draft_authored = FALSE AND (
+			id IN (SELECT current_message_id FROM imap_drafts
+			       UNION SELECT pending_original_message_id FROM imap_drafts WHERE pending_original_message_id IS NOT NULL
+			       UNION SELECT current_message_id FROM gmail_drafts
+			       UNION SELECT pending_original_message_id FROM gmail_drafts WHERE pending_original_message_id IS NOT NULL)
+			OR EXISTS (SELECT 1 FROM sources src WHERE src.id = messages.source_id
+			           AND `+draftEvidenceSQL("messages", "src")+`))`)
+	if err != nil {
+		return fmt.Errorf("backfill draft authorship: %w", err)
+	}
+	return nil
 }

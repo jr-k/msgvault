@@ -43,7 +43,7 @@ func TestImportMboxHealsPendingAccountAttribution(t *testing.T) {
 	source, err := st.GetSourceByTypeAndIdentifier("mbox", "archive@example.net")
 	require.NoError(err)
 	require.NoError(st.AddAccountIdentity(source.ID, "work@example.org", "manual"))
-	ledger := "rederive:account-attribution:mbox:archive@example.net:v1"
+	ledger := "rederive:account-attribution:mbox:archive@example.net:v2"
 	legacy := func(dropLedger bool) {
 		_, err := st.DB().Exec(st.Rebind(`UPDATE messages SET account_address = NULL, account_path = NULL WHERE source_id = ?`), source.ID)
 		require.NoError(err)

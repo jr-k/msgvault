@@ -11,7 +11,7 @@ import (
 // accountAttributionVersion identifies the account-attribution rules. A bump
 // that changes output must also clear account_path for the affected sources,
 // because the pass only derives pending rows.
-const accountAttributionVersion = "v1"
+const accountAttributionVersion = "v2"
 
 func init() {
 	RegisterAllSourceTypes("account-attribution", accountAttributionVersion, repairAccountAttribution)

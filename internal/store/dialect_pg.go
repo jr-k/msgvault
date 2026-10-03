@@ -654,6 +654,7 @@ func (d *PostgreSQLDialect) LegacyColumnMigrations() []ColumnMigration {
 		{`ALTER TABLE messages ADD COLUMN IF NOT EXISTS list_id TEXT`, "list_id"},
 		{`ALTER TABLE messages ADD COLUMN IF NOT EXISTS account_address TEXT`, "account_address"},
 		{`ALTER TABLE messages ADD COLUMN IF NOT EXISTS account_path TEXT`, "account_path"},
+		{`ALTER TABLE messages ADD COLUMN IF NOT EXISTS draft_authored BOOLEAN NOT NULL DEFAULT FALSE`, "draft_authored"},
 		{`ALTER TABLE sources ADD COLUMN IF NOT EXISTS oauth_app TEXT`, "oauth_app"},
 		{`ALTER TABLE participants ADD COLUMN IF NOT EXISTS phone_number TEXT`, "phone_number"},
 		{`ALTER TABLE participants ADD COLUMN IF NOT EXISTS canonical_id TEXT`, "canonical_id"},

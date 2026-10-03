@@ -32,7 +32,7 @@ func simulateLegacyEvents(t *testing.T, st *store.Store, src *store.Source, ledg
 	require.NoError(t, err)
 	if ledger {
 		_, err = st.DB().Exec(st.Rebind(`DELETE FROM applied_migrations WHERE name = ?`),
-			"rederive:account-attribution:"+src.SourceType+":"+src.Identifier+":v1")
+			"rederive:account-attribution:"+src.SourceType+":"+src.Identifier+":v2")
 		require.NoError(t, err)
 	}
 }

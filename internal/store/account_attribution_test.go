@@ -330,7 +330,7 @@ func TestAccountAttributionIdentityAndSinkChanges(t *testing.T) {
 
 func ledgerApplied(t *testing.T, st *store.Store, src *store.Source) bool {
 	t.Helper()
-	applied, err := st.IsMigrationApplied(fmt.Sprintf("rederive:account-attribution:%s:%s:v1", src.SourceType, src.Identifier))
+	applied, err := st.IsMigrationApplied(fmt.Sprintf("rederive:account-attribution:%s:%s:v2", src.SourceType, src.Identifier))
 	require.NoError(t, err)
 	return applied
 }
@@ -893,4 +893,50 @@ func TestAccountAttributionColumnIsIndexed(t *testing.T) {
 	var count int
 	require.NoError(t, st.DB().QueryRow(query).Scan(&count))
 	assert.Equal(t, 1, count, "a bare received: query must not scan every message")
+}
+
+func TestBackfillDraftAuthoredFromDraftRecords(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource("imap", "imap://alice@example.com:143")
+	require.NoError(err)
+	require.NoError(st.AddAccountIdentity(source.ID, "bob@example.com", "manual"))
+	conv, err := st.EnsureConversation(source.ID, "backfill", "Backfill")
+	require.NoError(err)
+	receipt := store.IMAPDraftReceipt{SourceID: source.ID, Mailbox: "Drafts", UIDValidity: 1, UID: 1}
+	draft, err := st.PersistIMAPDraftContext(t.Context(), receipt, nil, func([]int64) *store.MessagePersistData {
+		return &store.MessagePersistData{
+			Message: &store.Message{
+				SourceID: source.ID, SourceMessageID: store.IMAPDraftSourceMessageID(receipt),
+				MessageType: store.MessageTypeEmail, ConversationID: conv,
+			},
+			RawMIME: []byte("To: bob@example.com\r\n\r\nbody"),
+		}
+	})
+	require.NoError(err)
+	// An archive from before draft_authored: the draft record survives, its
+	// flag and label do not, and the row was attributed as received.
+	db := st.DB()
+	for _, stmt := range []string{
+		`DELETE FROM imap_message_memberships WHERE message_id = ?`,
+		`DELETE FROM message_labels WHERE message_id = ?`,
+		`UPDATE messages SET draft_authored = FALSE, account_address = 'bob@example.com', account_path = 'inbound' WHERE id = ?`,
+	} {
+		_, err = db.Exec(st.Rebind(stmt), draft.CurrentMessageID)
+		require.NoError(err)
+	}
+	_, err = db.Exec(st.Rebind(`DELETE FROM applied_migrations WHERE name = ?`), "draft_authored_v1")
+	require.NoError(err)
+	require.NoError(st.InitSchema())
+
+	var authored bool
+	var path sql.NullString
+	require.NoError(db.QueryRow(st.Rebind(`SELECT draft_authored, account_path FROM messages WHERE id = ?`),
+		draft.CurrentMessageID).Scan(&authored, &path))
+	assert.True(authored)
+	assert.False(path.Valid, "a received draft goes back to pending")
+	_, err = st.RepairAccountAttributionContext(t.Context(), source.ID, nil)
+	require.NoError(err)
+	assert.NotContains(searchIDs(t, st, "received:bob@example.com"), draft.CurrentMessageID)
 }

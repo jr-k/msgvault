@@ -1581,6 +1581,9 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 			return fmt.Errorf("create message account index: %w", err)
 		}
 	}
+	if err := s.runOnceMigration(ctx, migrationDraftAuthored, 1, false, s.backfillDraftAuthored); err != nil {
+		return fmt.Errorf("backfill draft authorship: %w", err)
+	}
 	if err := s.runOnceMigration(ctx, migrationCardDAVMultipleAccounts, 1, false, s.ensureCardDAVMultiAccountSchema); err != nil {
 		return fmt.Errorf("migrate CardDAV connections: %w", err)
 	}

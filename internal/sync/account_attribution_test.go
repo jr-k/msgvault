@@ -32,7 +32,7 @@ func TestSyncHealsPendingAccountAttribution(t *testing.T) {
 		require.NoError(err)
 		if dropLedger {
 			_, err = env.Store.DB().Exec(`DELETE FROM applied_migrations WHERE name = ?`,
-				"rederive:account-attribution:gmail:"+testEmail+":v1")
+				"rederive:account-attribution:gmail:"+testEmail+":v2")
 			require.NoError(err)
 		}
 	}
@@ -59,7 +59,7 @@ func TestSyncContinuesWhenHealFails(t *testing.T) {
 	runFullSync(t, env)
 	source, err := env.Store.GetOrCreateSource("gmail", testEmail)
 	require.NoError(err)
-	ledger := "rederive:account-attribution:gmail:" + testEmail + ":v1"
+	ledger := "rederive:account-attribution:gmail:" + testEmail + ":v2"
 	db := env.Store.DB()
 	_, err = db.Exec(`UPDATE messages SET account_address = NULL, account_path = NULL WHERE source_id = ?`, source.ID)
 	require.NoError(err)

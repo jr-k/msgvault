@@ -1366,6 +1366,7 @@ CREATE TABLE IF NOT EXISTS messages (
     identity_is_from_me BOOLEAN NOT NULL DEFAULT FALSE,
     account_address TEXT,
     account_path TEXT,
+    draft_authored BOOLEAN NOT NULL DEFAULT FALSE,
 
     subject TEXT,
     snippet TEXT,
