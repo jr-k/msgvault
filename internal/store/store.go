@@ -1569,6 +1569,14 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 			lastModifiedColumnAdded = true
 		}
 	}
+	// account: and received: filter on these; created here because the
+	// columns arrive through the legacy migrations above.
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_messages_account
+		ON messages(account_address, account_path)
+	`); err != nil {
+		return fmt.Errorf("create message account index: %w", err)
+	}
 	if err := s.runOnceMigration(ctx, migrationCardDAVMultipleAccounts, 1, false, s.ensureCardDAVMultiAccountSchema); err != nil {
 		return fmt.Errorf("migrate CardDAV connections: %w", err)
 	}

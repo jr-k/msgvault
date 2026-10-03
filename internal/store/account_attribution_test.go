@@ -872,3 +872,15 @@ func TestAccountAttributionDraftsAndRelocation(t *testing.T) {
 	require.NoError(err)
 	assert.Contains(searchIDs(t, fixture.Store, "received:work@example.org"), relocated)
 }
+
+func TestAccountAttributionColumnIsIndexed(t *testing.T) {
+	st := testutil.NewTestStore(t)
+	query := `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_messages_account'`
+	if st.IsPostgreSQL() {
+		query = `SELECT COUNT(*) FROM pg_indexes
+			WHERE schemaname = current_schema() AND indexname = 'idx_messages_account'`
+	}
+	var count int
+	require.NoError(t, st.DB().QueryRow(query).Scan(&count))
+	assert.Equal(t, 1, count, "a bare received: query must not scan every message")
+}
