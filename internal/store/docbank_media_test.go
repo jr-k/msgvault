@@ -751,19 +751,35 @@ func TestBeeperMediaCandidateAttachmentStates(t *testing.T) {
 	zeroBytes := addBeeperAudio(t, f.Store, gmail.ID, gmailConversation, "gmail-zero-bytes", fmt.Sprintf("%064x", 9))
 	_, err = f.Store.DB().Exec(f.Store.Rebind(`UPDATE attachments SET size = 0 WHERE id = ?`), zeroBytes.attachmentID)
 	require.NoError(err)
-	beeperAudio := addBeeperAudio(t, f.Store, f.Source.ID, f.ConvID, "beeper-empty-state", strings.Repeat("a", 64))
-	_, err = f.Store.DB().Exec(f.Store.Rebind(`UPDATE attachments SET attachment_state = NULL WHERE id = ?`), beeperAudio.attachmentID)
+	// An upgraded archive leaves legacy Beeper audio with a NULL state; only
+	// rows whose bytes reached the archive count as stored.
+	legacyStored := addBeeperAudio(t, f.Store, f.Source.ID, f.ConvID, "beeper-legacy-stored", strings.Repeat("a", 64))
+	_, err = f.Store.DB().Exec(f.Store.Rebind(`UPDATE attachments SET attachment_state = NULL WHERE id = ?`), legacyStored.attachmentID)
+	require.NoError(err)
+	want[legacyStored.attachmentID] = ""
+	legacyMissing := addBeeperAudio(t, f.Store, f.Source.ID, f.ConvID, "beeper-legacy-missing", strings.Repeat("c", 64))
+	_, err = f.Store.DB().Exec(f.Store.Rebind(`UPDATE attachments SET attachment_state = NULL, storage_path = '' WHERE id = ?`),
+		legacyMissing.attachmentID)
 	require.NoError(err)
 
 	candidates, err := f.Store.ListBeeperMediaCandidates(t.Context(), 0, 10)
 	require.NoError(err)
 	require.Len(candidates, len(want))
 	for _, candidate := range candidates {
-		assert.Equal("gmail", candidate.SourceType)
 		assert.Equal(want[candidate.AttachmentID], candidate.AttachmentState)
 		delete(want, candidate.AttachmentID)
 	}
 	assert.Empty(want)
+
+	// The missing one still shows on its message as a recording never captured.
+	occurrences, err := f.Store.ListMessageMediaOccurrences(t.Context(), "discovery", legacyMissing.messageID)
+	require.NoError(err)
+	require.Len(occurrences, 1)
+	assert.Equal(legacyMissing.attachmentID, occurrences[0].AttachmentID)
+	assert.Empty(occurrences[0].OccurrenceRef)
+	occurrences, err = f.Store.ListMessageMediaOccurrences(t.Context(), "discovery", legacyStored.messageID)
+	require.NoError(err)
+	assert.Empty(occurrences)
 }
 
 func TestBeeperMediaSchemaReopen(t *testing.T) {
