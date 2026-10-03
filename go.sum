@@ -419,8 +419,8 @@ go.kenn.io/docbank v0.14.1-0.20261001015536-a212ec3d2e4a h1:g4KdBhGQ7Snti64JWsi+
 go.kenn.io/docbank v0.14.1-0.20261001015536-a212ec3d2e4a/go.mod h1:M7V2C3ysfJr4zRYU5fE2cmO/NG3v54RQb+Ius0E2VUk=
 go.kenn.io/kata v0.18.1-0.20261001005735-0bf1e54c63d3 h1:8oega4wck83f4J71auZkCOyXP79l3ELs96MlBlY4OH8=
 go.kenn.io/kata v0.18.1-0.20261001005735-0bf1e54c63d3/go.mod h1:RoD5oU7ZI/Q2oyzqEmYEd/hj48OqRcGXD85ujLxdlt8=
-go.kenn.io/kit v0.30.2-0.20261002223014-711756d2a97d h1:K+qSGnWNHEPp72B3oKqW6wgJLyUSp73mgKPqvkibpow=
-go.kenn.io/kit v0.30.2-0.20261002223014-711756d2a97d/go.mod h1:1dwPTub5BoAcdZT8dL6O4juFULzZ38b9tqHxiniduVk=
+go.kenn.io/kit v0.30.2-0.20261003003746-c4dd642ae68f h1:3Xy1J1l4df41Pcrq+RRI8f8608JIW7651SmQPUBPWvs=
+go.kenn.io/kit v0.30.2-0.20261003003746-c4dd642ae68f/go.mod h1:1dwPTub5BoAcdZT8dL6O4juFULzZ38b9tqHxiniduVk=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
 go.opentelemetry.io/auto/sdk v1.2.1/go.mod h1:KRTj+aOaElaLi+wW1kO/DZRXwkF4C5xPbEe3ZiIhN7Y=
 go.opentelemetry.io/contrib/bridges/prometheus v0.70.0 h1:qU2CqTGdlstwoVhu1WfjJJ3z2ntcNjTJO0ksTsFKzPI=

@@ -12,7 +12,7 @@ import (
 
 const (
 	telemetryEventsPath           = "/api/v1/telemetry/events"
-	maxTelemetryEventRequestBytes = 1 << 20
+	maxTelemetryEventRequestBytes = 64 << 10 // matches kit's capture handler cap, so oversized bodies get this route's 400
 )
 
 // TelemetryEventRequest documents the body kit's capture handler accepts.

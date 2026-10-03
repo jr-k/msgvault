@@ -55,6 +55,7 @@ func TestCaptureHandlerAnswersDisabledUnderGoTest(t *testing.T) {
 
 	post := func(handler http.Handler, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
 		resp := httptest.NewRecorder()
 		handler.ServeHTTP(resp, req)
 		return resp
