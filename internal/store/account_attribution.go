@@ -254,17 +254,44 @@ func accountSink(sourceType, identifier string) string {
 	address := strings.TrimSpace(identifier)
 	switch sourceType {
 	case "imap", "imaps", "imap+starttls":
-		if u, err := url.Parse(address); err == nil && u.User != nil {
-			switch strings.ToLower(u.Scheme) {
-			case "imap", "imaps", "imap+starttls":
-				address = u.User.Username()
-			}
-		}
+		address = imapIdentifierUser(address)
 	}
 	if !isExactMailbox(address) {
 		return ""
 	}
 	return NormalizeIdentifierForCompare(address)
+}
+
+// imapIdentifierUser returns the username of an "imaps://user@host:port"
+// identifier, or the identifier unchanged when it has no IMAP scheme. The
+// username may hold its own "@", and an identifier url.Parse rejects (an
+// unescaped "%" in a legacy username) falls back to the text before the
+// last "@".
+func imapIdentifierUser(identifier string) string {
+	scheme, rest, ok := strings.Cut(identifier, "://")
+	if !ok {
+		return identifier
+	}
+	switch strings.ToLower(scheme) {
+	case "imap", "imaps", "imap+starttls":
+	default:
+		return identifier
+	}
+	if u, err := url.Parse(identifier); err == nil {
+		if u.User == nil {
+			return identifier
+		}
+		return u.User.Username()
+	}
+	at := strings.LastIndex(rest, "@")
+	if at <= 0 {
+		return identifier
+	}
+	user := rest[:at]
+	if unescaped, err := url.PathUnescape(user); err == nil {
+		user = unescaped
+	}
+	return user
 }
 
 func isExactMailbox(address string) bool {
