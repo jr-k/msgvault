@@ -180,7 +180,7 @@ func TestDraftReplyInferredSenderGrantBoundary(t *testing.T) {
 }
 
 func TestDraftReplyUsesStructuredRecipientIdentity(t *testing.T) {
-	for _, mode := range []string{"preserved", "null", "empty", "raw cc", "mixed"} {
+	for _, mode := range []string{"preserved", "null", "empty", "encoded to", "raw cc", "mixed"} {
 		t.Run(mode, func(t *testing.T) {
 			requirements, assertions := require.New(t), assert.New(t)
 			f := newDraftReplyFixture(t)
@@ -191,10 +191,17 @@ func TestDraftReplyUsesStructuredRecipientIdentity(t *testing.T) {
 			requirements.NoError(err)
 			requirements.NoError(f.store.ReplaceMessageRecipients(f.parentID, "to", []int64{shopID}, []string{"Shop"}))
 			setDraftParentRecipient(t, f.store, f.parentID, "to", "shop@example.test")
+			if mode == "encoded to" {
+				raw, err := f.store.GetMessageRaw(f.parentID)
+				requirements.NoError(err)
+				raw = bytes.Replace(raw, []byte("To: shop@example.test"), []byte("To: =?windows-1252?Q?Andr=E9?= <shop@example.test>"), 1)
+				requirements.Contains(string(raw), "To: =?windows-1252?Q?Andr=E9?= <shop@example.test>")
+				requirements.NoError(f.store.UpsertMessageRaw(f.parentID, raw))
+			}
 			if mode == "raw cc" {
 				setDraftParentRecipient(t, f.store, f.parentID, "cc", "shop@example.test")
 			}
-			if mode == "null" || mode == "empty" || mode == "raw cc" {
+			if mode == "null" || mode == "empty" || mode == "encoded to" || mode == "raw cc" {
 				var snapshot any
 				if mode == "empty" {
 					snapshot = ""
@@ -226,7 +233,7 @@ func TestDraftReplyUsesStructuredRecipientIdentity(t *testing.T) {
 				calls++
 				return factory(ctx, source)
 			}
-			if mode == "null" || mode == "empty" || mode == "raw cc" {
+			if mode == "null" || mode == "empty" || mode == "encoded to" || mode == "raw cc" {
 				assertions.Equal(testutil.IMAPTestUsername, recipients[0].EmailAddress)
 				assertions.Empty(recipients[0].EnvelopeAddress)
 			} else {

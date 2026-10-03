@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jhillyerd/enmime/v2"
 	"go.kenn.io/msgvault/internal/agentgrant"
 	"go.kenn.io/msgvault/internal/api"
 	"go.kenn.io/msgvault/internal/config"
@@ -380,7 +381,7 @@ func (a *storeAPIAdapter) resolveDraftTarget(
 				return draftReplyTarget{}, "", nil, draftReplyError("invalid_parent", fmt.Errorf("read parent headers: %w", err))
 			}
 			for _, role := range []string{"To", "Cc"} {
-				addresses, err := message.Header.AddressList(role)
+				addresses, err := enmime.ParseAddressList(message.Header.Get(role))
 				if err != nil {
 					continue
 				}
