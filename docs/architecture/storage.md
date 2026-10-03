@@ -74,7 +74,7 @@ The Store derives `account_address` and `account_path` in the same transaction
 as every write that changes their inputs: raw MIME, recipients, Sent labels,
 confirmed identities and the source identifier. They never change `source_id`.
 Rows other than email and calendar events keep both columns NULL. The
-[received-account design](../internal/received-as-identity-design.md) records
+[received-account design](https://github.com/kenn-io/msgvault/blob/main/docs/internal/received-as-identity-design.md) records
 the rules; [Searching](../usage/searching.md#find-mail-by-the-address-that-received-it)
 covers `received:` and `account:`.
 

@@ -7181,6 +7181,37 @@ func TestHandleSearch_FTSRejectsStructuredSemanticFilters(t *testing.T) {
 	}
 }
 
+func TestHandleSearch_HybridRejectsAccountOperators(t *testing.T) {
+	t.Parallel()
+	backend := &fakeVectorBackend{
+		active: &vector.Generation{
+			ID: 1, Model: "fake", Dimension: 4,
+			Fingerprint: "fake:4", State: vector.GenerationActive,
+		},
+	}
+	engine := hybrid.NewEngine(backend, nil, stubEmbedder{}, hybrid.Config{
+		ExpectedFingerprint: "fake:4", RRFK: 60, KPerSignal: 10,
+	})
+	srv := NewServerWithOptions(ServerOptions{
+		Config:       &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+		Store:        &mockStore{},
+		HybridEngine: engine,
+		Backend:      backend,
+		Logger:       testLogger(),
+	})
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/search?q=lunch+received:work@example.org&mode=hybrid", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "status (body: %s)", w.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&errResp), "decode")
+	assert.Equal(t, "unsupported_filter_mode", errResp.Error, "error")
+	assert.Contains(t, errResp.Message, "use --mode=fts")
+}
+
 func TestHandleSearch_DefaultFTSRejectsStructuredSemanticFilter(t *testing.T) {
 	t.Parallel()
 	srv, _ := newTestServerWithMockStore(t)

@@ -5572,19 +5572,6 @@ func (s *Store) ReplaceReactions(messageID int64, reactions []ReactionRef) error
 // Unlike UpsertMessageRaw (which hardcodes 'mime'), this accepts the format as a parameter.
 func (s *Store) UpsertMessageRawWithFormat(messageID int64, rawData []byte, format string) error {
 	ctx := context.Background()
-	// Delivery evidence comes only from MIME, so a write that neither stores
-	// MIME nor replaces it leaves attribution alone and takes no lock.
-	storedMIME := func(q querier) (bool, error) {
-		var stored int
-		err := q.QueryRow(`SELECT 1 FROM message_raw WHERE message_id = ? AND raw_format = 'mime'`, messageID).Scan(&stored)
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
-		if err != nil {
-			return false, fmt.Errorf("read raw format of message %d: %w", messageID, err)
-		}
-		return true, nil
-	}
 	write := func(tx *loggedTx) error {
 		if err := s.lockMeetingEvidenceWith(ctx, tx, messageID); err != nil {
 			return err
@@ -5594,9 +5581,14 @@ func (s *Store) UpsertMessageRawWithFormat(messageID int64, rawData []byte, form
 		}
 		replacesMIME := false
 		if format != "mime" {
-			var err error
-			if replacesMIME, err = storedMIME(boundQuerier{ctx: ctx, q: tx}); err != nil {
-				return err
+			var stored int
+			err := tx.QueryRowContext(ctx,
+				`SELECT 1 FROM message_raw WHERE message_id = ? AND raw_format = 'mime'`, messageID).Scan(&stored)
+			switch {
+			case err == nil:
+				replacesMIME = true
+			case !errors.Is(err, sql.ErrNoRows):
+				return fmt.Errorf("read raw format of message %d: %w", messageID, err)
 			}
 			if replacesMIME && tx.attribution == nil {
 				return errRawNeedsAttributionLock
@@ -5618,17 +5610,12 @@ func (s *Store) UpsertMessageRawWithFormat(messageID int64, rawData []byte, form
 		return nil
 	}
 	if format != "mime" {
-		replacesMIME, err := storedMIME(boundQuerier{ctx: ctx, q: s.db})
-		if err != nil {
+		// Delivery evidence comes only from MIME, so a write that neither
+		// stores MIME nor replaces it takes no attribution lock. One that
+		// finds MIME to replace rolls back and retries holding the lock.
+		err := s.withTxContext(ctx, write)
+		if !errors.Is(err, errRawNeedsAttributionLock) {
 			return err
-		}
-		if !replacesMIME {
-			// A MIME write that lands after this read sends the write back
-			// through the attribution entry below.
-			err := s.withTxContext(ctx, write)
-			if !errors.Is(err, errRawNeedsAttributionLock) {
-				return err
-			}
 		}
 	}
 	return s.withMessageAttributionTxContext(ctx, messageID, write)

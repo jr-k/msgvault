@@ -89,7 +89,7 @@ address and calendar events of that calendar.
 
 Delivery headers are routing hints, not proof that you own an address, and
 attribution never lets msgvault send from it. The
-[design record](../internal/received-as-identity-design.md) lists the headers
+[design record](https://github.com/kenn-io/msgvault/blob/main/docs/internal/received-as-identity-design.md) lists the headers
 and the order msgvault trusts them in.
 
 ### Domain Search

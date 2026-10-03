@@ -12,6 +12,10 @@ import (
 	"go.kenn.io/msgvault/internal/vector"
 )
 
+// ErrAccountFiltersUnsupported rejects account: and received: in vector and
+// hybrid search, which cannot filter on them yet.
+var ErrAccountFiltersUnsupported = errors.New("account: and received: filters are not supported in vector or hybrid search yet; use --mode=fts")
+
 // BuildFilter translates a parsed Gmail-syntax query into a
 // vector.Filter by resolving address/label tokens to IDs against the
 // main DB. Matches the semantics of the existing SQLite search path
@@ -42,7 +46,7 @@ func BuildFilter(ctx context.Context, db *sql.DB, rebind func(string) string, q 
 		return f, nil
 	}
 	if len(q.AccountAddrs) > 0 || len(q.ReceivedAddrs) > 0 {
-		return f, errors.New("account: and received: filters are not supported in vector or hybrid search yet; use --mode=fts")
+		return f, ErrAccountFiltersUnsupported
 	}
 	if rebind == nil {
 		rebind = identityRebind

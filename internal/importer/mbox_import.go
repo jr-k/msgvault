@@ -143,9 +143,7 @@ func ImportMbox(
 	defer func() {
 		retErr = errors.Join(retErr, execution.Release())
 	}()
-	if err := healDerived(ctx, st, src); err != nil {
-		return nil, err
-	}
+	healDerived(ctx, st, src)
 
 	// Resume from a recovered checkpoint, then create a new run under the
 	// source ownership held for this import.
