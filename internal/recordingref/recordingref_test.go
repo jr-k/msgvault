@@ -65,3 +65,21 @@ func TestTeamsPointer(t *testing.T) {
 	require.NoError(err)
 	assert.Equal("https://example.test", origin)
 }
+
+func TestScanHTML(t *testing.T) {
+	for _, raw := range []string{"https://cap.so/s/abc!", "https://cap.so/s/abc?token=secret!", "https://cap.so/s/abc?token=secret)"} {
+		t.Run(raw, func(t *testing.T) {
+			assert, require := assert.New(t), require.New(t)
+			refs := ScanHTML(`<a href="`+raw+`">Watch recording</a>`, nil)
+			require.Len(refs, 1)
+			assert.Equal(raw, refs[0].Reference)
+			if raw == "https://cap.so/s/abc!" {
+				plain := Scan("https://cap.so/s/abc", nil)
+				require.Len(plain, 1)
+				assert.NotEqual(plain[0].RouteKey, refs[0].RouteKey)
+				assert.Equal(raw, refs[0].Canonical)
+			}
+		})
+	}
+	assert.Empty(t, ScanHTML(`<a href="prefix https://cap.so/s/abc">Watch</a>`, nil))
+}

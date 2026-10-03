@@ -92,50 +92,58 @@ func CanonicalOrigin(raw string) (string, error) {
 	return u.Scheme + "://" + u.Host, nil
 }
 
-func Scan(text string, origins []string) []Ref {
+func originSet(origins []string) map[string]bool {
 	allowed := make(map[string]bool, len(origins))
 	for _, raw := range origins {
 		if origin, err := CanonicalOrigin(raw); err == nil {
 			allowed[origin] = true
 		}
 	}
+	return allowed
+}
+
+func admit(raw string, allowed map[string]bool) (Ref, bool) {
+	u, err := parse(raw)
+	if err != nil {
+		return Ref{}, false
+	}
+	path := recordingPath.FindStringSubmatch(u.EscapedPath())
+	if path == nil || u.EscapedPath() != u.Path {
+		return Ref{}, false
+	}
+	origin := u.Scheme + "://" + u.Host
+	var kind Kind
+	switch {
+	case u.Scheme == "https" && (u.Host == "loom.com" || u.Host == "www.loom.com") && (path[1] == "share" || path[1] == "embed"):
+		kind = Loom
+	case u.Scheme == "https" && (u.Host == "cap.so" || u.Host == "www.cap.so") && path[1] != "share":
+		kind = CapCloud
+	case allowed[origin] && path[1] != "share":
+		kind = CapSelfHosted
+	default:
+		return Ref{}, false
+	}
+	canonical := origin + u.EscapedPath()
+	identity := canonical
+	if kind == Loom {
+		identity = "loom:" + path[1] + "/" + path[2]
+	}
+	if kind == CapCloud {
+		identity = "cap:" + path[2]
+	}
+	if kind == CapSelfHosted {
+		canonical = ""
+	}
+	return Ref{Kind: kind, Origin: origin, RouteKey: digest(string(kind) + "\x00" + identity), Reference: raw, Canonical: canonical}, true
+}
+
+func Scan(text string, origins []string) []Ref {
+	allowed := originSet(origins)
 	seen := make(map[string]bool)
 	var refs []Ref
 	for _, token := range tokens.FindAllString(text, -1) {
 		raw := strings.TrimRight(token, ".,;:!?)]}'")
-		u, err := parse(raw)
-		if err != nil {
-			continue
-		}
-		path := recordingPath.FindStringSubmatch(u.EscapedPath())
-		if path == nil || u.EscapedPath() != u.Path {
-			continue
-		}
-		origin := u.Scheme + "://" + u.Host
-		var kind Kind
-		switch {
-		case u.Scheme == "https" && (u.Host == "loom.com" || u.Host == "www.loom.com") && (path[1] == "share" || path[1] == "embed"):
-			kind = Loom
-		case u.Scheme == "https" && (u.Host == "cap.so" || u.Host == "www.cap.so") && path[1] != "share":
-			kind = CapCloud
-		case allowed[origin] && path[1] != "share":
-			kind = CapSelfHosted
-		default:
-			continue
-		}
-		canonical := origin + u.EscapedPath()
-		identity := canonical
-		if kind == Loom {
-			identity = "loom:" + path[1] + "/" + path[2]
-		}
-		if kind == CapCloud {
-			identity = "cap:" + path[2]
-		}
-		if kind == CapSelfHosted {
-			canonical = ""
-		}
-		r := Ref{Kind: kind, Origin: origin, RouteKey: digest(string(kind) + "\x00" + identity), Reference: raw, Canonical: canonical}
-		if !seen[r.RouteKey] {
+		if r, ok := admit(raw, allowed); ok && !seen[r.RouteKey] {
 			refs = append(refs, r)
 			seen[r.RouteKey] = true
 		}
@@ -145,6 +153,7 @@ func Scan(text string, origins []string) []Ref {
 
 // ScanHTML sends archived anchor targets through the same offline admission rule.
 func ScanHTML(body string, origins []string) []Ref {
+	allowed := originSet(origins)
 	z := html.NewTokenizer(strings.NewReader(body))
 	var refs []Ref
 	for {
@@ -162,7 +171,9 @@ func ScanHTML(body string, origins []string) []Ref {
 				key, value, next := z.TagAttr()
 				more = next
 				if bytes.EqualFold(key, []byte("href")) {
-					refs = append(refs, Scan(string(value), origins)...)
+					if r, ok := admit(string(value), allowed); ok {
+						refs = append(refs, r)
+					}
 					break
 				}
 			}

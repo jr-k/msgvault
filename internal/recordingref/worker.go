@@ -54,12 +54,10 @@ func (w *Worker) gated(ctx context.Context, fn func() error) error {
 }
 
 func messageRefs(m store.RecordingMessage, origins []string) []Ref {
-	refs := Scan(m.Body, origins)
+	var refs []Ref
 	seen := make(map[string]bool)
-	for _, r := range refs {
-		seen[r.RouteKey] = true
-	}
-	for _, r := range ScanHTML(m.BodyHTML, origins) {
+	// Exact anchor targets take precedence over prose punctuation heuristics.
+	for _, r := range append(ScanHTML(m.BodyHTML, origins), Scan(m.Body, origins)...) {
 		if !seen[r.RouteKey] {
 			refs = append(refs, r)
 			seen[r.RouteKey] = true
@@ -265,7 +263,7 @@ func (w *Worker) deliver(ctx context.Context, claim store.RecordingReferenceClai
 			if docbankmedia.IsNotFound(err) && claim.LastSendAt != nil && !now.Before(claim.LastSendAt.Add(referenceRequestTimeout+5*time.Minute)) {
 				result.State, result.ErrorCode = "withdrawn", "receipt_not_found"
 				if rebuildable {
-					result.State = "blocked"
+					result.State, result.NextActionAt = "pending", now
 				}
 			}
 		}

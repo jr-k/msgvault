@@ -103,7 +103,7 @@ func TestRecordingReferenceFeedHTML(t *testing.T) {
 	f := storetest.New(t)
 	id := f.CreateMessage("html-recording")
 	text := "Watch recording"
-	body := `<p><a href="https://loom.com/share/abc?token=one&amp;key=two">Watch recording</a></p><a href="https://loom.com/share/abc?token=one&amp;key=two">Again</a>`
+	body := `<p><a href="https://loom.com/share/abc?token=one&amp;key=two!">Watch recording</a></p><a href="https://loom.com/share/abc?token=one&amp;key=two!">Again</a>`
 	require.NoError(f.Store.UpsertMessageBody(id, sql.NullString{String: text, Valid: true}, sql.NullString{String: body, Valid: true}))
 	requests := make(chan docbankmedia.ReferenceRequest, 5)
 	client := recordingClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -117,18 +117,17 @@ func TestRecordingReferenceFeedHTML(t *testing.T) {
 	w := NewWorker(f.Store, client, "destination", nil, nil)
 	runDiscovery(t, w, 1)
 	require.Len(requests, 1)
-	assert.Equal("https://loom.com/share/abc?token=one&key=two", (<-requests).ReferenceURL)
+	assert.Equal("https://loom.com/share/abc?token=one&key=two!", (<-requests).ReferenceURL)
 	savedText, savedHTML := f.GetMessageBody(id)
 	assert.Equal(text, savedText.String)
 	assert.Equal(body, savedHTML.String)
-	recordingText := "Watch recording https://loom.com/share/abc?token=one&key=two"
+	recordingText := "Watch recording https://loom.com/share/abc?token=one&key=two!"
 	require.NoError(f.Store.UpsertMessageBody(id, sql.NullString{String: recordingText, Valid: true}, sql.NullString{String: body, Valid: true}))
 	m, exists, err := f.Store.ReadRecordingMessage(t.Context(), id)
 	require.NoError(err)
 	require.True(exists)
 	require.Len(messageRefs(m, nil), 1)
-	_, err = w.RunBatch(t.Context())
-	require.NoError(err)
+	assert.Eventually(func() bool { result, err := w.RunBatch(t.Context()); require.NoError(err); return result.Examined > 0 }, 5*time.Second, 10*time.Millisecond)
 	assert.Empty(requests)
 }
 
@@ -534,6 +533,7 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 			id := f.CreateMessage("recording")
 			recordingBody(t, f, id, "https://loom.com/share/abc?token=one")
 			lose := true
+			var accept atomic.Bool
 			var requests []docbankmedia.ReferenceRequest
 			var get string
 			client := recordingClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -566,7 +566,7 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 					_ = conn.Close()
 					return
 				}
-				if tc.status != http.StatusOK {
+				if tc.status != http.StatusOK && !accept.Load() {
 					w.WriteHeader(tc.status)
 					return
 				}
@@ -617,8 +617,17 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 					_, err = w.RunBatch(t.Context())
 					require.NoError(err)
 					state, code, _ = recordingState(t, f, id)
-					assert.Equal("blocked", state)
+					assert.Equal("pending", state)
 					assert.Equal("receipt_not_found", code)
+					accept.Store(true)
+					_, err = w.RunBatch(t.Context())
+					require.NoError(err)
+					state, code, after = recordingState(t, f, id)
+					assert.Equal("retained", state)
+					assert.Empty(code)
+					assert.Equal(op, after)
+					require.Len(requests, 3)
+					assert.Equal(requests[0], requests[2])
 				}
 			} else {
 				assert.Equal("/api/v1/media/operations/"+op, get)
