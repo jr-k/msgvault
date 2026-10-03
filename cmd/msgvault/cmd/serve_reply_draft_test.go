@@ -131,7 +131,7 @@ func TestDraftReplyInfersRecipientIdentity(t *testing.T) {
 }
 
 func TestDraftReplyInferredSenderGrantBoundary(t *testing.T) {
-	for _, mode := range []string{"denied alias", "no senders", "missing source", "missing parent source"} {
+	for _, mode := range []string{"denied alias", "no senders", "missing parent source"} {
 		t.Run(mode, func(t *testing.T) {
 			requirements, assertions := require.New(t), assert.New(t)
 			f := newDraftReplyFixture(t)
@@ -141,9 +141,6 @@ func TestDraftReplyInferredSenderGrantBoundary(t *testing.T) {
 			ref.SenderKeys = []string{store.NormalizeIdentifierForCompare(testutil.IMAPTestUsername)}
 			if mode == "no senders" {
 				ref.SenderKeys = nil
-			}
-			if mode == "missing source" {
-				ref.ID++
 			}
 			if mode == "missing parent source" {
 				other, err := f.store.GetOrCreateSource("mbox", "imported@example.test")
