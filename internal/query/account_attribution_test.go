@@ -1,8 +1,10 @@
 package query_test
 
 import (
+	"database/sql"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -73,4 +75,30 @@ func TestAccountOperatorsOnLiveEngine(t *testing.T) {
 	assert.Zero(count)
 	toAfter, _ := run("to:alias@example.org")
 	assert.Equal(toBefore, toAfter, "to: results never depend on attribution")
+
+	// account: also covers calendar events, so aggregates must not fall back
+	// to the email-only default.
+	event, err := st.UpsertMessage(&store.Message{
+		SourceID: f.Source.ID, ConversationID: f.ConvID, SourceMessageID: "event", MessageType: "calendar_event",
+		SentAt: sql.NullTime{Time: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), Valid: true},
+	})
+	require.NoError(err)
+	_, err = st.DB().Exec(st.Rebind(`UPDATE messages SET account_address = 'work@example.org', account_path = 'calendar' WHERE id = ?`), event)
+	require.NoError(err)
+	_, err = st.DB().Exec(st.Rebind(`UPDATE messages SET sent_at = ? WHERE id = ?`), time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), work)
+	require.NoError(err)
+	total := func(rows []query.AggregateRow) int64 {
+		var n int64
+		for _, row := range rows {
+			n += row.Count
+		}
+		return n
+	}
+	opts := query.AggregateOptions{SearchQuery: "account:work@example.org", TimeGranularity: query.TimeMonth}
+	rows, err := engine.Aggregate(t.Context(), query.ViewTime, opts)
+	require.NoError(err)
+	assert.Equal(int64(2), total(rows), "Aggregate counts the calendar event")
+	rows, err = engine.SubAggregate(t.Context(), query.MessageFilter{}, query.ViewTime, opts)
+	require.NoError(err)
+	assert.Equal(int64(2), total(rows), "SubAggregate counts the calendar event")
 }

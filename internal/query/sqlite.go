@@ -647,13 +647,7 @@ func (e *SQLiteEngine) Aggregate(ctx context.Context, groupBy ViewType, opts Agg
 }
 
 func aggregateHasExplicitMessageType(filter MessageFilter, opts AggregateOptions) bool {
-	if filter.MessageType != "" {
-		return true
-	}
-	if opts.SearchQuery == "" {
-		return false
-	}
-	return len(search.Parse(opts.SearchQuery).MessageTypes) > 0
+	return filter.MessageType != "" || hasExplicitMessageTypeSearch(opts.SearchQuery)
 }
 
 func sqliteMessageTypeCondition(alias string, messageTypes []string) (string, []any) {

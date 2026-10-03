@@ -243,11 +243,16 @@ func outboundEvidenceLabelSQL(l, src string) string {
 }
 
 // outboundEvidenceExistsSQL is true when message m carries a Sent or Drafts
-// label of its own source. src must be m's source row.
+// label of its own source, or an IMAP membership with the \Draft flag, which
+// marks a draft even in a mailbox the server gives no Drafts role. src must be
+// m's source row.
 func outboundEvidenceExistsSQL(m, src string) string {
-	return `EXISTS (SELECT 1 FROM message_labels ml JOIN labels l ON l.id = ml.label_id
+	return `(EXISTS (SELECT 1 FROM message_labels ml JOIN labels l ON l.id = ml.label_id
 		WHERE ml.message_id = ` + m + `.id AND l.source_id = ` + m + `.source_id
-		  AND ` + outboundEvidenceLabelSQL("l", src) + `)`
+		  AND ` + outboundEvidenceLabelSQL("l", src) + `)
+		OR EXISTS (SELECT 1 FROM imap_message_memberships imm
+		WHERE imm.message_id = ` + m + `.id AND imm.source_id = ` + m + `.source_id
+		  AND LOWER(CAST(imm.flags AS TEXT)) LIKE '%"\\draft"%' ESCAPE '!'))`
 }
 
 // accountSink returns the mailbox a source delivers into, normalized, or ""
@@ -704,38 +709,31 @@ func (s *Store) refreshCalendarAccountAttributionTx(ctx context.Context, tx *log
 	return s.refreshAccountAttributionForMessagesTx(ctx, tx, ids)
 }
 
-func messageHasOutboundEvidenceTx(ctx context.Context, tx *loggedTx, messageID int64) (bool, error) {
-	var sent bool
-	err := tx.QueryRowContext(ctx, `
-		SELECT `+outboundEvidenceExistsSQL("m", "src")+`
-		FROM messages m JOIN sources src ON src.id = m.source_id
-		WHERE m.id = ?`, messageID).Scan(&sent)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("read outbound evidence for message %d: %w", messageID, err)
-	}
-	return sent, nil
-}
-
-// refreshAccountAttributionIfOutboundChangedTx runs a label membership mutation
-// and refreshes the message only when its outbound evidence changed.
+// refreshAccountAttributionIfOutboundChangedTx runs a label or membership
+// mutation, then refreshes the message when its stored direction no longer
+// matches its outbound evidence. Comparing against the stored path, rather
+// than evidence before the mutation, also catches flag writes made earlier in
+// the transaction. Pending rows are left to the repair pass.
 func (s *Store) refreshAccountAttributionIfOutboundChangedTx(
 	ctx context.Context, tx *loggedTx, messageID int64, mutate func() error,
 ) error {
-	before, err := messageHasOutboundEvidenceTx(ctx, tx, messageID)
-	if err != nil {
-		return err
-	}
 	if err := mutate(); err != nil {
 		return err
 	}
-	after, err := messageHasOutboundEvidenceTx(ctx, tx, messageID)
-	if err != nil {
-		return err
+	var path sql.NullString
+	var outbound bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT m.account_path, `+outboundEvidenceExistsSQL("m", "src")+`
+		FROM messages m JOIN sources src ON src.id = m.source_id
+		WHERE m.id = ?`, messageID).Scan(&path, &outbound)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
 	}
-	if before == after {
+	if err != nil {
+		return fmt.Errorf("read outbound evidence for message %d: %w", messageID, err)
+	}
+	if !path.Valid || (path.String != accountPathInbound && path.String != accountPathSent) ||
+		(path.String == accountPathSent) == outbound {
 		return nil
 	}
 	_, err = s.refreshAccountAttributionTx(ctx, tx, messageID, deliveryInput{})

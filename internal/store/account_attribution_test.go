@@ -565,6 +565,20 @@ func TestAccountAttributionDraftsAreNotReceived(t *testing.T) {
 	})
 	require.NoError(err)
 	assert.NotContains(searchIDs(t, f.st, "received:"+attrSink), id)
+
+	// A server that gives its drafts mailbox no role still flags each draft.
+	plain := newAttrFixtureOn(t, f.st, "imap", "imaps://plain%40example.net@mail.example.net:993")
+	plain.confirm("plain@example.net")
+	draftID := plain.persist(attrMail{raw: "To: friend@example.com\r\n\r\nbody", to: []string{"friend@example.com"}, sourceMsgKey: "plain-1"})
+	assert.Contains(searchIDs(t, f.st, "received:plain@example.net"), draftID)
+	folder := store.IMAPFolderState{Mailbox: "Brouillons", UIDValidity: 3, UIDNext: 2}
+	require.NoError(f.st.ApplyIMAPMailboxDeltas(plain.source.ID, []store.IMAPMailboxDelta{
+		{Mailbox: "Brouillons", State: folder, Memberships: []store.IMAPMembershipObservation{
+			{Mailbox: "Brouillons", UIDValidity: 3, UID: 1, SourceMessageID: "plain-1", Flags: []string{"\\Draft", "\\Seen"}}}},
+	}))
+	assert.NotContains(searchIDs(t, f.st, "received:plain@example.net"), draftID, "the \\Draft flag marks it written")
+	_, path = attribution(t, f.st, draftID)
+	assert.Equal("sent", path.String)
 }
 
 func TestAccountAttributionLabelDefinitionChanges(t *testing.T) {
@@ -840,10 +854,6 @@ func TestAccountAttributionDraftsAndRelocation(t *testing.T) {
 	isource, err := st.GetOrCreateSource("imap", "imap://alice@example.com:143")
 	require.NoError(err)
 	require.NoError(st.AddAccountIdentity(isource.ID, "work@example.org", "manual"))
-	_, err = st.EnsureLabelsBatch(isource.ID, map[string]store.LabelInfo{
-		"Drafts": {Name: "Drafts", Type: "system", SystemRole: store.LabelSystemRoleDrafts},
-	})
-	require.NoError(err)
 	iconv, err := st.EnsureConversation(isource.ID, "draft-thread", "Draft")
 	require.NoError(err)
 	ireceipt := store.IMAPDraftReceipt{SourceID: isource.ID, Mailbox: "Drafts", UIDValidity: 1, UID: 5}

@@ -513,10 +513,6 @@ func (s *Store) MergeDuplicates(
 		}
 	}
 	err := s.withAttributionTxContext(ctx, lock, func(tx *loggedTx) error {
-		sentBefore, err := messageHasOutboundEvidenceTx(ctx, tx, survivorID)
-		if err != nil {
-			return err
-		}
 		for _, dupID := range duplicateIDs {
 			res, err := tx.Exec(unionLabelsSQL, survivorID, dupID)
 			if err != nil {
@@ -560,12 +556,7 @@ func (s *Store) MergeDuplicates(
 			_, err := s.refreshAccountAttributionTx(ctx, tx, survivorID, deliveryInput{reloadMIME: true})
 			return err
 		}
-		sentAfter, err := messageHasOutboundEvidenceTx(ctx, tx, survivorID)
-		if err != nil || sentAfter == sentBefore {
-			return err
-		}
-		_, err = s.refreshAccountAttributionTx(ctx, tx, survivorID, deliveryInput{})
-		return err
+		return s.refreshAccountAttributionIfOutboundChangedTx(ctx, tx, survivorID, func() error { return nil })
 	})
 	return result, err
 }
