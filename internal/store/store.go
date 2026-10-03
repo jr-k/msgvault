@@ -106,6 +106,8 @@ type Store struct {
 	listIDRepairAfterScanHook             func(context.Context, *loggedTx, []listIDRepairUpdate) error
 	listIDRepairAfterFingerprintLockHook  func()
 	imapLabelRepairPerMessageHook         func(messageID int64)
+	attributionAfterLockHook              func(sourceIDs []int64)
+	accountAttributionAfterReadHook       func(messageID int64)
 	cardDAVConflictResolveSnapshotHook    func()
 	cardDAVTombstonePrepareSnapshotHook   func()
 	cardDAVReviewPersonLockHook           func()
@@ -130,7 +132,9 @@ type Store struct {
 	// contentChangedBackfillBatch and rfc822IDBackfillBatch. Per-Store for
 	// the same reason.
 	contentChangedBackfillBatchSizeOverride int64
-	rfc822IDBackfillBatchSizeOverride       int
+	// accountRepairPageSizeOverride shrinks account-attribution repair pages in tests.
+	accountRepairPageSizeOverride     int
+	rfc822IDBackfillBatchSizeOverride int
 }
 
 // synchronous=FULL + fullfsync=true protects WAL writes against OS/power crashes
@@ -884,6 +888,15 @@ func (s *Store) withReadSnapshotContext(
 func (s *Store) withTxOptionsContext(
 	ctx context.Context, opts *sql.TxOptions, fn func(tx *loggedTx) error,
 ) error {
+	return s.withTxLockedContext(ctx, opts, nil, fn)
+}
+
+// withTxLockedContext runs preFence after BEGIN and before the sync-generation
+// fence, so locks that must precede sync_runs are taken first.
+func (s *Store) withTxLockedContext(
+	ctx context.Context, opts *sql.TxOptions,
+	preFence func(*loggedTx) error, fn func(tx *loggedTx) error,
+) error {
 	start := time.Now()
 	slog.Debug("sql tx begin")
 	tx, err := s.db.BeginTx(ctx, opts)
@@ -891,12 +904,13 @@ func (s *Store) withTxOptionsContext(
 		slog.Warn("sql tx begin failed", "error", err.Error())
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	if s.syncGeneration != nil && (opts == nil || !opts.ReadOnly) {
-		// Match maintenance lock order before the generation fence touches sync_runs.
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
+	if preFence != nil {
+		if err := preFence(tx); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
+	}
+	if s.syncGeneration != nil && (opts == nil || !opts.ReadOnly) {
 		if err := s.fenceSyncGenerationTx(ctx, tx); err != nil {
 			_ = tx.Rollback()
 			return err
@@ -1557,9 +1571,6 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 	}
 	if err := s.runOnceMigration(ctx, migrationCardDAVMultipleAccounts, 1, false, s.ensureCardDAVMultiAccountSchema); err != nil {
 		return fmt.Errorf("migrate CardDAV connections: %w", err)
-	}
-	if err := s.ensureAccountAttributionSchema(ctx); err != nil {
-		return err
 	}
 	if err := s.ensureCacheSourceAttribution(ctx); err != nil {
 		return err

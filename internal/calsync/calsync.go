@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"go.kenn.io/msgvault/internal/gcal"
+	"go.kenn.io/msgvault/internal/rederive"
 	"go.kenn.io/msgvault/internal/store"
 )
 
@@ -218,6 +219,11 @@ func (s *Syncer) syncCalendarFull(
 	}
 	if err := s.updateCalendarSourceOAuthApp(src.ID, cal.ID); err != nil {
 		return err
+	}
+	// Heal events an older msgvault archived before its config and confirmed
+	// identity existed; the ledger makes this a no-op once done.
+	if _, _, err := rederive.RunIfStale(ctx, s.store, src.SourceType, src.Identifier, src.ID, nil); err != nil {
+		return fmt.Errorf("re-derive archived events: %w", err)
 	}
 
 	// Resume a stopped run from its checkpoint, then start a new run. StartSync

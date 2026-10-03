@@ -182,10 +182,7 @@ func (s *Store) applyIMAPMailboxDeltas(
 	if deltas == nil {
 		return errors.New("apply IMAP mailbox deltas: nil authoritative topology")
 	}
-	return s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
-		}
+	return s.withAttributionTxContext(ctx, attributionLock{Sources: []int64{sourceID}}, func(tx *loggedTx) error {
 		if syncRunID > 0 {
 			if err := validateCurrentSyncGeneration(
 				ctx, tx, sourceID, syncRunID, SyncStatusCompleted,
@@ -342,7 +339,9 @@ func (s *Store) applyIMAPMailboxDeltas(
 				}
 				labelIDs = append(labelIDs, labelID)
 			}
-			if _, err := s.reconcileMessageLabelsTxContext(ctx, tx, messageID, labelIDs, true); err != nil {
+			if err := s.refreshAccountAttributionIfSentChangedTx(ctx, tx, messageID, func() error {
+				return replaceMessageLabelsTx(tx, messageID, labelIDs)
+			}); err != nil {
 				return fmt.Errorf("replace labels for IMAP message %d: %w", messageID, err)
 			}
 			if len(mailboxes) == 0 {
@@ -1042,6 +1041,9 @@ func ensureIMAPMailboxLabel(ctx context.Context, tx *loggedTx, sourceID int64, m
 	// have no ctx of their own, so it takes a querier rather than a context.
 	// boundQuerier carries ctx to its statements without changing that
 	// signature or any other caller.
+	if err := labelFlipsTx(ctx, tx, sourceID).captureLabels(nil, []string{mailbox}); err != nil {
+		return 0, err
+	}
 	labelID, err = ensureLabelWith(
 		boundQuerier{ctx: ctx, q: tx}, sourceID, mailbox, mailbox, "user", nil,
 	)
@@ -1091,10 +1093,7 @@ func (s *Store) RepairIMAPSourceLabels(
 	ctx context.Context, sourceID int64, apply bool,
 ) (IMAPLabelRepairSummary, error) {
 	var summary IMAPLabelRepairSummary
-	txErr := s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
-		}
+	txErr := s.withAttributionTxContext(ctx, attributionLock{Sources: []int64{sourceID}}, func(tx *loggedTx) error {
 		messageIDs, err := distinctIMAPMembershipMessageIDs(ctx, tx, sourceID)
 		if err != nil {
 			return err

@@ -1394,8 +1394,6 @@ func TestRemoveAccountCmd_DiscordPreservesTokenWhenRemainingBindingCannotResolve
 
 func TestDiscordAddLifecycleBlocksFinalCredentialRemovalUntilGuildRegistration(t *testing.T) {
 	cfg := testConfigValue()
-	// Bound the observed transitions through real archive and filesystem work.
-	const lifecycleTransitionTimeout = 30 * time.Second
 
 	require := require.New(t)
 	assert := assert.New(t)
@@ -1444,7 +1442,7 @@ func TestDiscordAddLifecycleBlocksFinalCredentialRemovalUntilGuildRegistration(t
 	case <-credentialSaved:
 	case err := <-addDone:
 		require.FailNow("Discord add ended before lifecycle pause", "error: %v", err)
-	case <-time.After(lifecycleTransitionTimeout):
+	case <-time.After(5 * time.Second):
 		require.FailNow("timed out waiting for Discord credential save")
 	}
 
@@ -1466,7 +1464,7 @@ func TestDiscordAddLifecycleBlocksFinalCredentialRemovalUntilGuildRegistration(t
 	case <-removeReachedLifecycleLock:
 	case err := <-removeDone:
 		require.FailNow("removal ended before reaching Discord lifecycle lock", "error: %v", err)
-	case <-time.After(lifecycleTransitionTimeout):
+	case <-time.After(5 * time.Second):
 		require.FailNow("timed out waiting for removal to reach Discord lifecycle lock")
 	}
 	select {
@@ -1480,7 +1478,7 @@ func TestDiscordAddLifecycleBlocksFinalCredentialRemovalUntilGuildRegistration(t
 		select {
 		case err := <-result:
 			return err
-		case <-time.After(lifecycleTransitionTimeout):
+		case <-time.After(5 * time.Second):
 			require.FailNow("timed out waiting for Discord lifecycle operation", "operation: %s", label)
 			return errors.New("unreachable timeout")
 		}

@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"go.kenn.io/msgvault/internal/identityindex"
-	"go.kenn.io/msgvault/internal/search"
 )
 
 var ErrInvalidExploreRequest = errors.New("invalid exploration request")
@@ -29,9 +28,6 @@ func (e *DuckDBEngine) Explore(ctx context.Context, request ExploreRequest) (*Ex
 	}
 	defer release()
 
-	if err := search.ValidateAccountScopes(request.Context.AccountScopes); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidExploreRequest, err)
-	}
 	if request.Page.Offset < 0 || request.Page.Limit < 0 || request.Page.Limit > maxExploreLimit {
 		return nil, fmt.Errorf("%w: page is outside the supported range", ErrInvalidExploreRequest)
 	}
@@ -305,12 +301,6 @@ func validateResolvedSearch(search SearchSpec) (SearchProvenance, error) {
 func buildExploreConditions(request ExploreRequest) (string, []any) {
 	var conditions []string
 	var args []any
-	accountConditions, accountArgs := search.AppendAccountConditions(nil, nil, request.Context.AccountScopes, "m", "account_identity_group_memberships")
-	if len(accountConditions) > 0 {
-		conditions = append(conditions, "message_id IN (SELECT m.id FROM message_accounts m WHERE "+strings.Join(accountConditions, " AND ")+")")
-		args = append(args, accountArgs...)
-	}
-
 	appendIntAnyOf := func(values []int64, expression string) {
 		if len(values) == 0 {
 			return

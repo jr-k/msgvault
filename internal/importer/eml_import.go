@@ -149,6 +149,9 @@ func importRawDirectory(ctx context.Context, st *store.Store, root string,
 	defer func() {
 		retErr = errors.Join(retErr, execution.Release())
 	}()
+	if err := healDerived(ctx, st, source); err != nil {
+		return nil, err
+	}
 
 	var (
 		syncID     int64

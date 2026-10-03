@@ -15,7 +15,6 @@ import (
 	"time"
 
 	sqlite3 "github.com/mattn/go-sqlite3"
-	"go.kenn.io/msgvault/internal/search"
 	"go.kenn.io/msgvault/internal/sqliteutil"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/vector"
@@ -1426,7 +1425,6 @@ func (b *Backend) filteredMessageIDsLimit(ctx context.Context, f vector.Filter, 
 	}
 	clauses := []string{store.LiveMessagesWhere("m", true)}
 	var args []any
-	clauses, args = search.AppendAccountConditions(clauses, args, f.AccountScopes, "m", "account_identity_group_memberships")
 	if len(f.MessageIDs) > 0 {
 		clauses = append(clauses, inClause("m.id", f.MessageIDs))
 		for _, id := range f.MessageIDs {

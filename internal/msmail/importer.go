@@ -15,6 +15,7 @@ import (
 	"go.kenn.io/msgvault/internal/importer"
 	"go.kenn.io/msgvault/internal/mime"
 	"go.kenn.io/msgvault/internal/msgraph"
+	"go.kenn.io/msgvault/internal/rederive"
 	"go.kenn.io/msgvault/internal/store"
 	"golang.org/x/sync/errgroup"
 )
@@ -85,6 +86,9 @@ func Import(ctx context.Context, st *store.Store, c *Client, opts Options, log *
 		mergeCursors(cursors, cp.CursorBefore.String)
 	}
 
+	if _, _, err := rederive.RunIfStale(ctx, st, src.SourceType, src.Identifier, src.ID, nil); err != nil {
+		return nil, fmt.Errorf("re-derive archived messages: %w", err)
+	}
 	syncID, err := st.StartSync(src.ID, SourceType)
 	if err != nil {
 		return nil, err

@@ -174,6 +174,9 @@ func importPstWithBatchSize(
 	defer func() {
 		retErr = errors.Join(retErr, execution.Release())
 	}()
+	if err := healDerived(ctx, st, src); err != nil {
+		return nil, err
+	}
 
 	// Set display name to the PST filename so it appears in list-accounts / get_stats.
 	pstBase := filepath.Base(absPath)

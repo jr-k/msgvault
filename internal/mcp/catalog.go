@@ -436,7 +436,7 @@ func searchMessagesOutputSchema() *jsonschema.Schema {
 }
 
 func accountProperty() *jsonschema.Schema {
-	return stringSchema("Filter by physical account email, virtual account key, or identity group (use get_stats to list accounts)")
+	return stringSchema("Filter by account email address (use get_stats to list available accounts)")
 }
 
 func afterProperty() *jsonschema.Schema {
@@ -457,7 +457,8 @@ func offsetProperty() *jsonschema.Schema {
 
 const (
 	searchMetadataOperatorDoc = "Supported operators: from:, to:, cc:, bcc:, subject:, label: (or l:), has:attachment, " +
-		"before:/after: (YYYY-MM-DD), older_than:/newer_than: (e.g. 7d, 2w, 1m, 1y), larger:/smaller: (e.g. 5M). " +
+		"before:/after: (YYYY-MM-DD), older_than:/newer_than: (e.g. 7d, 2w, 1m, 1y), larger:/smaller: (e.g. 5M), " +
+		"account:, received: (exact addresses; received: excludes sent mail and calendar events). " +
 		"Bare domains on from:/to: match any address at that domain. Multiple terms are ANDed. " +
 		"Not supported: negation (-), OR, or parentheses grouping."
 	searchMetadataFreeTextDoc = "Free text matches subject, snippet, and sender/recipient metadata only (not bodies). " +
@@ -768,8 +769,8 @@ func listMessagesDefinition(_ *handlers) toolDefinition {
 func getStatsDefinition(_ *handlers) toolDefinition {
 	return readDefinition(
 		ToolGetStats,
-		"Get archive overview: total messages, size, attachment count, and accounts. Optionally scope statistics to an account.",
-		closedObject(map[string]*jsonschema.Schema{toolArgAccount: accountProperty()}),
+		"Get archive overview: total messages, size, attachment count, and accounts.",
+		closedObject(map[string]*jsonschema.Schema{}),
 		outputSchemaFor[getStatsResponse](),
 		(*handlers).getStats,
 	)

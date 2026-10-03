@@ -1428,7 +1428,6 @@ CREATE TABLE IF NOT EXISTS messages (
     identity_is_from_me BOOLEAN NOT NULL DEFAULT FALSE,
     account_address TEXT,
     account_path TEXT,
-    account_attribution_basis TEXT NOT NULL DEFAULT 'not-derived',
 
     -- Content
     subject TEXT,               -- email subject, NULL for chat
@@ -4528,24 +4527,14 @@ CREATE INDEX IF NOT EXISTS idx_meeting_actions_status
 CREATE INDEX IF NOT EXISTS idx_meeting_actions_assignee
     ON meeting_action_items(assignee_email, message_id, ordinal);
 
--- Recomputable account attribution; raw message provenance remains unchanged.
-CREATE TABLE IF NOT EXISTS message_account_evidence (
-    message_id BIGINT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
-    evidence TEXT NOT NULL
+-- Delivery-header addresses read from each email's stored MIME. Account
+-- attribution derives messages.account_address from them; they are hints
+-- about routing, not proof of ownership.
+CREATE TABLE IF NOT EXISTS message_delivery_addresses (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,      -- 'original' or 'delivered'
+    address TEXT NOT NULL,   -- lowercased mailbox
+    PRIMARY KEY (message_id, kind, address)
 );
-CREATE TABLE IF NOT EXISTS message_account_mentions (
-    source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-    message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-    address_key TEXT NOT NULL,
-    PRIMARY KEY(message_id, address_key)
-);
-CREATE INDEX IF NOT EXISTS idx_account_mentions_address ON message_account_mentions(source_id, address_key, message_id);
-CREATE TABLE IF NOT EXISTS account_attribution_repair_progress (
-    source_id BIGINT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
-    last_message_id BIGINT NOT NULL DEFAULT 0,
-    high_water_id BIGINT NOT NULL,
-    rule_version INTEGER NOT NULL,
-    completed INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE VIEW IF NOT EXISTS account_identity_group_memberships AS SELECT ai.source_id, 'fastmail-masked:' || LOWER(src.identifier) AS group_key, ai.address_key FROM account_identities ai JOIN sources src ON src.id=ai.source_id WHERE (',' || ai.source_signal || ',') LIKE '%,fastmail-masked-email,%';
+CREATE INDEX IF NOT EXISTS idx_message_delivery_addresses_address
+    ON message_delivery_addresses(address, message_id);

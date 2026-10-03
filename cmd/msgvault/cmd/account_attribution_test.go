@@ -3,6 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,19 @@ import (
 	"go.kenn.io/msgvault/internal/store"
 )
 
+var attributionSentAt = sql.NullTime{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Valid: true}
+
+func summaryIDs(rows []query.MessageSummary) []int64 {
+	ids := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// TestAccountAttributionCacheParity compares account: and received: on the
+// exported cache with the live SQLite archive, through both snapshot paths.
 func TestAccountAttributionCacheParity(t *testing.T) {
 	for _, csv := range []bool{false, true} {
 		t.Run(map[bool]string{false: "scanner", true: "csv"}[csv], func(t *testing.T) {
@@ -31,72 +45,59 @@ func TestAccountAttributionCacheParity(t *testing.T) {
 			src, err := st.GetOrCreateSource("gmail", "inbox@example.net")
 			require.NoError(err)
 			require.NoError(st.AddAccountIdentity(src.ID, "work@example.org", "manual"))
-			require.NoError(st.AddAccountIdentity(src.ID, "mask@example.org", "fastmail-masked-email"))
+			require.NoError(st.AddAccountIdentity(src.ID, "mask@example.org", "manual"))
 			conv, err := st.EnsureConversation(src.ID, "thread", "synthetic thread")
 			require.NoError(err)
 			for _, header := range []string{"X-Delivered-To: work@example.org", "X-Delivered-To: mask@example.org", "X-Delivered-To: work@example.org, mask@example.org"} {
-				_, err = st.PersistMessageContext(t.Context(), &store.MessagePersistData{Message: &store.Message{SourceID: src.ID, ConversationID: conv, SourceMessageID: header, MessageType: "email", SentAt: sql.NullTime{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Valid: true}}, RawMIME: []byte("From: sender@example.test\r\n" + header + "\r\n\r\nbody")})
+				_, err = st.PersistMessageContext(t.Context(), &store.MessagePersistData{
+					Message: &store.Message{SourceID: src.ID, ConversationID: conv, SourceMessageID: header, MessageType: "email", SentAt: attributionSentAt},
+					RawMIME: []byte("From: sender@example.test\r\n" + header + "\r\n\r\nbody"),
+				})
 				require.NoError(err)
 			}
 			calendar, err := st.GetOrCreateSource("gcal", "calendar-login@example.net")
 			require.NoError(err)
-			require.NoError(st.UpdateSourceSyncConfig(calendar.ID, `{"calendar_id":"work@example.org"}`))
+			require.NoError(st.UpdateSourceSyncConfig(calendar.ID, `{"account_email":"work@example.org","calendar_id":"primary"}`))
 			require.NoError(st.AddAccountIdentity(calendar.ID, "work@example.org", "manual"))
 			calendarConv, err := st.EnsureConversation(calendar.ID, "event", "Synthetic calendar")
 			require.NoError(err)
-			_, err = st.UpsertMessage(&store.Message{SourceID: calendar.ID, ConversationID: calendarConv, SourceMessageID: "event", MessageType: "calendar_event", SentAt: sql.NullTime{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Valid: true}})
+			_, err = st.UpsertMessage(&store.Message{SourceID: calendar.ID, ConversationID: calendarConv, SourceMessageID: "event", MessageType: "calendar_event", SentAt: attributionSentAt})
 			require.NoError(err)
+
 			cache := filepath.Join(t.TempDir(), "analytics")
 			_, err = buildCache(path, cache, true)
 			require.NoError(err)
-			engine, err := query.NewDuckDBEngine(cache, "", nil)
+			duck, err := query.NewDuckDBEngine(cache, path, nil)
 			require.NoError(err)
-			defer func() { require.NoError(engine.Close()) }()
-			for _, selector := range []string{"account:work@example.org", "account:fastmail-masked:inbox@example.net", "account:unattributed", "received:work@example.org"} {
-				for _, padded := range []bool{false, true} {
-					parsed := search.Parse(selector)
-					if padded {
-						for i := range parsed.AccountScopes {
-							for j, address := range parsed.AccountScopes[i].Addresses {
-								parsed.AccountScopes[i].Addresses[j] = " \t" + strings.ToUpper(address) + " \n"
-							}
-							for j, group := range parsed.AccountScopes[i].Groups {
-								parsed.AccountScopes[i].Groups[j] = " \t" + strings.ToUpper(group) + " \n"
-							}
-						}
-					}
-					require.NoError(search.ValidateAccountScopes(parsed.AccountScopes))
-					want := 1
-					if selector == "account:work@example.org" {
-						want = 2
-					}
-					rows, err := engine.ListMessages(t.Context(), query.MessageFilter{AccountScopes: parsed.AccountScopes})
-					require.NoError(err)
-					assert.Len(rows, want, selector)
-					count, err := engine.SearchFastCount(t.Context(), parsed, query.MessageFilter{})
-					require.NoError(err)
-					assert.Equal(int64(want), count, selector)
-					explored, err := engine.Explore(t.Context(), query.ExploreRequest{Context: query.Context{AccountScopes: parsed.AccountScopes}})
-					require.NoError(err)
-					assert.Len(explored.Rows, want, selector)
-					stats, err := engine.GetTotalStats(t.Context(), query.StatsOptions{Filter: &query.MessageFilter{AccountScopes: parsed.AccountScopes}})
-					require.NoError(err)
-					assert.Equal(int64(want), stats.MessageCount, selector)
-					aggregate, err := engine.Aggregate(t.Context(), query.ViewTime, query.AggregateOptions{AccountScopes: parsed.AccountScopes})
-					require.NoError(err)
-					var total int64
-					for _, row := range aggregate {
-						total += row.Count
-					}
-					assert.Equal(int64(want), total, selector)
-					aggregate, err = engine.SubAggregate(t.Context(), query.MessageFilter{AccountScopes: parsed.AccountScopes}, query.ViewTime, query.AggregateOptions{})
-					require.NoError(err)
-					total = 0
-					for _, row := range aggregate {
-						total += row.Count
-					}
-					assert.Equal(int64(want), total, selector)
+			defer func() { require.NoError(duck.Close()) }()
+			live := query.NewSQLiteEngine(st.DB())
+			for selector, want := range map[string]int{
+				"account:work@example.org":                            2,
+				"received:work@example.org":                           1,
+				"account:mask@example.org":                            1,
+				"received:work@example.org received:mask@example.org": 2,
+				"account:work@example.org received:work@example.org":  1,
+			} {
+				parsed := search.Parse(selector)
+				require.NoError(parsed.Err())
+				liveCount, err := live.SearchFastCount(t.Context(), parsed, query.MessageFilter{})
+				require.NoError(err)
+				duckCount, err := duck.SearchFastCount(t.Context(), parsed, query.MessageFilter{})
+				require.NoError(err)
+				assert.Equal(int64(want), liveCount, selector)
+				assert.Equal(liveCount, duckCount, selector)
+				liveRows, err := live.Search(t.Context(), parsed, 100, 0)
+				require.NoError(err)
+				// The sqlite_scan fallback exists only where DuckDB loads the
+				// scanner extension; the Parquet path below runs everywhere.
+				duckRows, err := duck.Search(t.Context(), parsed, 100, 0)
+				if err == nil || !strings.Contains(err.Error(), "Search requires SQLite") {
+					require.NoError(err, selector)
+					assert.Equal(summaryIDs(liveRows), summaryIDs(duckRows), selector)
 				}
+				cachedRows, err := duck.SearchFast(t.Context(), parsed, query.MessageFilter{}, 100, 0)
+				require.NoError(err)
+				assert.Equal(summaryIDs(liveRows), summaryIDs(cachedRows), selector)
 			}
 		})
 	}
@@ -115,7 +116,7 @@ func TestAccountAttributionAppendKeepsCacheIncremental(t *testing.T) {
 	require.NoError(err)
 	persist := func(key string) int64 {
 		id, err := st.PersistMessageContext(t.Context(), &store.MessagePersistData{
-			Message: &store.Message{SourceID: src.ID, ConversationID: conv, SourceMessageID: key, MessageType: "email", SentAt: sql.NullTime{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Valid: true}},
+			Message: &store.Message{SourceID: src.ID, ConversationID: conv, SourceMessageID: key, MessageType: "email", SentAt: attributionSentAt},
 			RawMIME: []byte("X-Delivered-To: work@example.org\r\n\r\nbody"),
 		})
 		require.NoError(err)
@@ -124,18 +125,19 @@ func TestAccountAttributionAppendKeepsCacheIncremental(t *testing.T) {
 	first := persist("first")
 	_, err = buildCache(c.DatabaseDSN(), c.AnalyticsDir(), true)
 	require.NoError(err)
+
 	persist("appended")
 	stale, err := cacheNeedsBuildForServing(t.Context(), c.DatabaseDSN(), c.AnalyticsDir())
 	require.NoError(err)
 	assert.True(stale.HasNew)
-	assert.False(stale.FullRebuild, "new attribution is carried by append: %s", stale.Reason)
+	assert.False(stale.FullRebuild, "a message carrying X-Delivered-To appends: %s", stale.Reason)
 	built, err := buildCacheAuto(c.DatabaseDSN(), c.AnalyticsDir())
 	require.NoError(err)
 	assert.Equal(int64(1), built.StagedCount)
-	// Changes below the published boundary must still replace cached facts.
-	require.NoError(st.UpsertMessageRaw(first, []byte("X-Delivered-To: work@example.org, mask@example.org\r\n\r\nbody")))
+
+	// New delivery evidence flips a published row's account.
+	require.NoError(st.UpsertMessageRaw(first, []byte("X-Delivered-To: mask@example.org\r\n\r\nbody")))
 	stale, err = cacheNeedsBuildForServing(t.Context(), c.DatabaseDSN(), c.AnalyticsDir())
 	require.NoError(err)
-	assert.True(stale.HasDerivedDataDrift)
-	assert.True(stale.FullRebuild)
+	assert.True(stale.FullRebuild, "a published row whose account changed forces a rebuild: %s", stale.Reason)
 }

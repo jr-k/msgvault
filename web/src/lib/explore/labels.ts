@@ -34,7 +34,6 @@ export const EXPLORE_COLUMNS: ReadonlyArray<{ id: ExploreColumn; label: string }
 // Where the grouping label reads wrongly as a filter chip (plural, or a different word),
 // name it here.
 const FILTER_DIMENSIONS: Partial<Record<string, string>> = {
- account: 'Account',
   participant: 'Person',
   identity: 'Identity',
   domain: 'Domain',

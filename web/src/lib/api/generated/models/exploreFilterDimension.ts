@@ -6,7 +6,6 @@ export type ExploreFilterDimension =
   (typeof ExploreFilterDimension)[keyof typeof ExploreFilterDimension];
 
 export const ExploreFilterDimension = {
-  account: "account",
   source: "source",
   participant: "participant",
   domain: "domain",

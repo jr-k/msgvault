@@ -230,10 +230,7 @@ func (s *Store) addAccountIdentityOnce(
 	match identifierMatch,
 	onInsert accountIdentityInsertHook,
 ) error {
-	return s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
-		}
+	return s.withAttributionTxContext(ctx, attributionLock{Exclusive: true}, func(tx *loggedTx) error {
 		added, err := s.mergeAccountIdentitySignalsTx(ctx, tx, sourceID, addr, []string{signal}, match)
 		if err != nil {
 			return err
@@ -250,9 +247,7 @@ func (s *Store) addAccountIdentityOnce(
 					return err
 				}
 			}
-			if err := s.recomputeAccountIdentitiesWith(ctx, tx, sourceID, []string{addr}, nil); err != nil {
-				return err
-			}
+			return s.recomputeAccountAttributionForAddressesTx(ctx, tx, sourceID, []string{addr})
 		}
 		return nil
 	})
@@ -343,13 +338,6 @@ func (s *Store) mergeAccountIdentitySignalsTxWith(
 			); err != nil {
 				return false, true, fmt.Errorf("update source_signal: %w", err)
 			}
-			// A new masked membership changes virtual groups without changing
-			// ownership. Invalidate analytics while preserving identity revisions.
-			if !strings.Contains(","+existing+",", ",fastmail-masked-email,") && strings.Contains(","+merged+",", ",fastmail-masked-email,") {
-				if err := s.bumpDerivedDataRevision(tx); err != nil {
-					return false, true, err
-				}
-			}
 		}
 		return false, true, nil
 	}
@@ -412,10 +400,7 @@ func (s *Store) mergeConfirmedAccountIdentityChunkOnce(
 	confirmations []normalizedIdentityConfirmation,
 ) ([]IdentityConfirmationOutcome, error) {
 	outcomes := make([]IdentityConfirmationOutcome, 0, len(confirmations))
-	err := s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
-		}
+	err := s.withAttributionTxContext(ctx, attributionLock{Exclusive: true}, func(tx *loggedTx) error {
 		for _, confirmation := range confirmations {
 			_, present, err := s.mergeAccountIdentitySignalsTxWith(
 				ctx,
@@ -539,10 +524,27 @@ func (s *Store) RemoveAccountIdentityContext(
 ) (int64, error) {
 	match := newIdentifierMatch(address)
 	var removed int64
-	err := s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
+	err := s.withAttributionTxContext(ctx, attributionLock{Exclusive: true}, func(tx *loggedTx) error {
+		var removedAddresses []string
+		rows, err := tx.QueryContext(ctx,
+			`SELECT address FROM account_identities WHERE source_id = ? AND `+match.WhereClause("address"),
+			sourceID, match.BindValue())
+		if err != nil {
+			return fmt.Errorf("read account identity to remove: %w", err)
 		}
+		for rows.Next() {
+			var addr string
+			if err := rows.Scan(&addr); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan account identity to remove: %w", err)
+			}
+			removedAddresses = append(removedAddresses, addr)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("read account identity to remove: %w", err)
+		}
+		_ = rows.Close()
 		res, err := tx.ExecContext(ctx,
 			`DELETE FROM account_identities WHERE source_id = ? AND `+match.WhereClause("address"),
 			sourceID, match.BindValue(),
@@ -578,7 +580,7 @@ func (s *Store) RemoveAccountIdentityContext(
 		if err := refreshSourceMessageAttributionContext(ctx, tx, sourceID, ""); err != nil {
 			return err
 		}
-		return s.recomputeAccountIdentitiesWith(ctx, tx, sourceID, []string{address}, nil)
+		return s.recomputeAccountAttributionForAddressesTx(ctx, tx, sourceID, removedAddresses)
 	})
 	if err != nil {
 		return 0, err

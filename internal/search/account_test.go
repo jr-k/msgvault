@@ -1,64 +1,57 @@
 package search
 
 import (
-	"slices"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestAccountOperators(t *testing.T) {
-	for _, text := range []string{"account:", "received:example.org", "received:fastmail-masked:owner@example.net", "account:@example.org", "account:a@example.org,b@example.org"} {
-		t.Run(text, func(t *testing.T) {
-			assert := assert.New(t)
-			assert.Error(NewParser().Parse(text).Err())
-		})
-	}
+func TestAccountOperatorsParseExactAddresses(t *testing.T) {
 	assert := assert.New(t)
-	require := require.New(t)
-	q := NewParser().Parse(`account:Work+tag@Example.org account:fastmail-masked:owner@example.net received:work+tag@example.org received:unattributed`)
-	require.NoError(q.Err())
-	require.Len(q.AccountScopes, 2)
-	assert.Equal([]string{"work+tag@example.org"}, q.AccountScopes[0].Addresses)
-	assert.Equal([]string{"fastmail-masked:owner@example.net"}, q.AccountScopes[0].Groups)
-	assert.True(q.AccountScopes[1].Inbound)
-	assert.True(q.AccountScopes[1].Unattributed)
+	q := Parse("received:Work@Example.org received:mask@example.org account:inbox@example.net hello")
+	require.NoError(t, q.Err())
+	assert.Equal([]string{"work@example.org", "mask@example.org"}, q.ReceivedAddrs)
+	assert.Equal([]string{"inbox@example.net"}, q.AccountAddrs)
+	assert.Equal([]string{"hello"}, q.TextTerms)
+	assert.True(q.HasOperators())
 	assert.False(q.IsEmpty())
-	assert.Empty(q.TextTerms)
+
+	only := Parse("account:inbox@example.net")
+	assert.True(only.HasOperators())
+	assert.False(only.IsEmpty())
+
+	assertQueryEqual(t, *Parse(Format(q)), *q)
 }
 
-func TestAccountScopeTransportPreservesIntersection(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-	q := NewParser().Parse("account:work@example.org received:work@example.org")
-	q.AccountScopes = append(q.AccountScopes, AccountScope{Addresses: []string{"other@example.org"}})
-	got := NewParser().Parse(Format(q))
-	require.NoError(got.Err())
-	assert.Equal(q.AccountScopes, got.AccountScopes)
-}
-
-func TestAccountOperatorsIntersectWithTransportScopes(t *testing.T) {
-	scoped := strings.Join(FormatAccountScopes([]AccountScope{{Addresses: []string{"work@example.org"}}, {Addresses: []string{"work@example.org"}}}), " ")
-	for _, text := range []string{scoped + " account:other@example.org account:third@example.org", "account:other@example.org " + scoped + " account:third@example.org"} {
-		t.Run(text, func(t *testing.T) {
-			require := require.New(t)
+func TestAccountOperatorsRejectInexactValues(t *testing.T) {
+	for _, query := range []string{
+		"received:work",
+		"account:@example.org",
+		`account:"Name <a@example.org>"`,
+		"received:",
+	} {
+		t.Run(query, func(t *testing.T) {
 			assert := assert.New(t)
-			q := NewParser().Parse(text)
-			require.NoError(q.Err())
-			require.Len(q.AccountScopes, 3, "transport scopes must retain their intersections")
-			var simple, transported int
-			for _, scope := range q.AccountScopes {
-				if slices.Equal(scope.Addresses, []string{"other@example.org", "third@example.org"}) {
-					simple++
-				}
-				if slices.Equal(scope.Addresses, []string{"work@example.org"}) {
-					transported++
-				}
-			}
-			assert.Equal(1, simple, "repeated plain operators remain alternatives")
-			assert.Equal(2, transported, "transported scopes remain separate")
+			q := Parse(query)
+			require.Error(t, q.Err())
+			assert.Contains(q.Err().Error(), "expected an exact email address")
+			assert.Empty(q.AccountAddrs)
+			assert.Empty(q.ReceivedAddrs)
 		})
 	}
+}
+
+func TestAccountConditions(t *testing.T) {
+	assert := assert.New(t)
+	conditions, args := AccountConditions(Parse("received:a@example.org received:b@example.org account:c@example.org"), "m")
+	assert.Equal([]string{
+		"m.account_address IN (?)",
+		"(m.account_path = 'inbound' AND m.account_address IN (?,?))",
+	}, conditions)
+	assert.Equal([]any{"c@example.org", "a@example.org", "b@example.org"}, args)
+
+	conditions, args = AccountConditions(Parse("hello"), "msg")
+	assert.Empty(conditions)
+	assert.Empty(args)
 }

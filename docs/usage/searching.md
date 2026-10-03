@@ -47,8 +47,8 @@ msgvault supports a local subset of Gmail-like search syntax.
 | `subject:` | Subject text | `subject:meeting` |
 | `label:` | Gmail label | `label:INBOX`, `label:SENT` |
 | `list:` / `list-id:` | RFC 2919 List-Id literal substring | `list:announce.example.org` |
-| `account:` | Exact attributed email/calendar account or identity group | `account:work@example.org`, `account:fastmail-masked:inbox@example.net` |
-| `received:` | Exact attributed inbound email account | `received:work@example.org` |
+| `received:` | Exact address that received inbound mail | `received:work@example.org` |
+| `account:` | Exact account of received mail, sent mail, or a calendar event | `account:work@example.org` |
 | `has:attachment` | Has attachments | `has:attachment` |
 | `before:` | Before date | `before:2024-06-01` |
 | `after:` | After date | `after:2024-01-01` |
@@ -66,40 +66,31 @@ Quote a value when it contains spaces, for example
 `list-id:"Example Announcements"`. Repeating `list:` or `list-id:` uses AND
 semantics: every supplied substring must occur in the stored List-Id.
 
-### Forwarded mail and virtual accounts
+### Find mail by the address that received it
 
-Confirm an alias for its physical source before using account attribution.
-`received:work@example.org` finds inbound mail delivered to that alias, including
-forwarded messages. `account:work@example.org` also includes provider-marked sent
-mail from that address and mapped calendar events. Addresses match exactly,
-ignoring case; dots and plus suffixes stay significant.
+Several confirmed addresses can deliver into one archive source, for example
+work@ forwarding into a personal Gmail. `received:work@example.org` finds
+inbound mail that address received, including forwarded mail whose visible To
+shows a list or Bcc. `account:work@example.org` also finds sent mail from that
+address and calendar events of that calendar.
 
-Original-recipient headers take precedence over delivery chains and To/Cc.
-Conflicting confirmed aliases remain unattributed. Without stronger evidence,
-a confirmed source inbox can be used as a labelled fallback. For IMAP, the inbox
-is the validated mailbox username from connection configuration or the source
-URL. The connection URL itself is not an address. Header attribution does not
-authorize sending from an address. `received:unattributed` finds
-processed inbound ambiguity or missing evidence; `account:unattributed` also
-includes sent/calendar ambiguity and legacy rows awaiting repair.
+- Confirm the address for its source first (`msgvault identity add` or identity
+  discovery). Both operators take one exact address; case is ignored, dots and
+  plus suffixes are not.
+- msgvault picks one account per message from its delivery headers, then its
+  confirmed To/Cc recipients, then the source's own mailbox. When two confirmed
+  addresses tie, the message has no account and neither operator finds it.
+- `received:` excludes sent copies and calendar events. A message counts as
+  sent only when the provider filed it under Sent.
+- Repeating one operator matches any of the values; using both requires both.
+- Mail archived by an older version fills in on the source's next sync, or
+  right away with [`msgvault repair-derived`](../cli-reference.md#repair-derived).
+- `--mode=vector` and `--mode=hybrid` reject both operators; use `--mode=fts`.
 
-Repeated `account:` values are alternatives. Repeated `received:` values are
-alternatives in a separate group. The two groups intersect each other and all
-other filters. `--account` and collections still select physical sources.
-
-Fastmail masked identities can share `account:fastmail-masked:<account>` when
-provider inventory stamps their confirmed identities as masked addresses.
-This group stays one picker entry even with thousands of masks.
-`received:<masked-address>` always selects one exact address.
-
-The TUI account picker and Web UI account filter show virtual children for
-multi-identity sources, groups, and an unattributed bucket. They preserve the
-physical source's credentials and sync schedule. Child counts plus unattributed
-partition the eligible email/calendar messages; source-deleted counts are
-reported separately. The Web UI reports pending initial attribution repair.
-Older archives need [`repair-account-attribution`](../cli-reference.md#repair-account-attribution)
-before exact identity filters cover their historical mail. New ingestion and
-identity confirmation/removal maintain attribution automatically.
+Delivery headers are routing hints, not proof that you own an address, and
+attribution never lets msgvault send from it. The
+[design record](../internal/received-as-identity-design.md) lists the headers
+and the order msgvault trusts them in.
 
 ### Domain Search
 

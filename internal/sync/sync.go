@@ -22,6 +22,7 @@ import (
 	"go.kenn.io/msgvault/internal/gmail"
 	"go.kenn.io/msgvault/internal/identityops"
 	"go.kenn.io/msgvault/internal/mime"
+	"go.kenn.io/msgvault/internal/rederive"
 	"go.kenn.io/msgvault/internal/remoteimage"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/textutil"
@@ -1193,6 +1194,20 @@ func (s *Syncer) runWithSyncExecution(
 			err = errors.Join(err, releaseErr)
 		}
 	}()
+	src, err := s.store.GetSourceByIDContext(ctx, sourceID)
+	if err != nil {
+		return nil, fmt.Errorf("load source %d: %w", sourceID, err)
+	}
+	if src != nil {
+		sum, ran, err := rederive.RunIfStale(ctx, s.store, src.SourceType, src.Identifier, src.ID, nil)
+		if err != nil {
+			return nil, fmt.Errorf("re-derive archived messages: %w", err)
+		}
+		if ran && sum != nil {
+			s.logger.Info("re-derived archived messages",
+				"source_id", src.ID, "messages", sum.MessagesScanned, "undecodable", sum.Undecodable)
+		}
+	}
 	return run(execution)
 }
 
@@ -1581,7 +1596,7 @@ func (s *Syncer) syncLabels(ctx context.Context, sourceID int64) (map[string]int
 		}
 	}
 
-	return s.store.EnsureLabelsBatchContext(ctx, sourceID, labelInfos)
+	return s.store.EnsureLabelsBatch(sourceID, labelInfos)
 }
 
 // messageData holds all parsed data for a message before persistence.

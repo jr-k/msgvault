@@ -677,6 +677,11 @@ func (s *Store) buildMessageSearchSQL(q *search.Query, ftsAvailable bool) messag
 		}
 		conditions = append(conditions, "("+strings.Join(parts, " OR ")+")")
 	}
+	// account: and received: match the derived account projection.
+	if accountConditions, accountArgs := search.AccountConditions(q, "m"); len(accountConditions) > 0 {
+		conditions = append(conditions, accountConditions...)
+		args = append(args, accountArgs...)
+	}
 
 	// message_type: / message_type= filter. An "email" value also matches an
 	// empty or NULL message_type. Rows imported before the column existed
@@ -724,8 +729,6 @@ func (s *Store) buildMessageSearchSQL(q *search.Query, ftsAvailable bool) messag
 		conditions = append(conditions,
 			"m.source_id IN ("+strings.Join(placeholders, ",")+")")
 	}
-
-	conditions, args = search.AppendAccountConditions(conditions, args, q.AccountScopes, "m", "account_identity_group_memberships")
 
 	// conversation_id: filters one or more internal conversation scopes.
 	// Repeated operators are alternatives within the same dimension.

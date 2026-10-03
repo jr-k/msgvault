@@ -326,8 +326,6 @@ func TestRepairListIDsLeavesConcurrentRawResyncUntouched(t *testing.T) {
 	messageID := f.CreateMessage("list-id-concurrent-resync")
 	require.NoError(f.Store.UpsertMessageRaw(messageID,
 		[]byte("List-Id: <old.example.test>\r\n\r\nbody")))
-	beforeRevision, err := f.Store.DerivedDataRevision()
-	require.NoError(err)
 	restore := f.Store.SetListIDRepairBeforeApplyHookForTest(func() {
 		require.NoError(f.Store.UpsertMessageRaw(messageID,
 			[]byte("List-Id: <new.example.test>\r\n\r\nbody")))
@@ -341,7 +339,7 @@ func TestRepairListIDsLeavesConcurrentRawResyncUntouched(t *testing.T) {
 	assertListID(t, f, messageID, sql.NullString{String: "<new.example.test>", Valid: true})
 	revision, err := f.Store.DerivedDataRevision()
 	require.NoError(err)
-	assert.Equal(beforeRevision, revision)
+	assert.Zero(revision)
 }
 
 // TestRepairListIDsSkipsPostScanRawResync catches a repair that writes a
@@ -355,8 +353,6 @@ func TestRepairListIDsSkipsPostScanRawResync(t *testing.T) {
 	messageID := f.CreateMessage("list-id-post-scan-resync")
 	require.NoError(f.Store.UpsertMessageRaw(messageID,
 		[]byte("List-Id: <old.example.test>\r\n\r\nbody")))
-	beforeRevision, err := f.Store.DerivedDataRevision()
-	require.NoError(err)
 	restore := f.Store.SetListIDRepairAfterScanMutationForTest(
 		func(id int64, replaceRawAndListID func([]byte, string) error) error {
 			require.Equal(messageID, id)
@@ -372,7 +368,7 @@ func TestRepairListIDsSkipsPostScanRawResync(t *testing.T) {
 	assertListID(t, f, messageID, sql.NullString{String: "<new.example.test>", Valid: true})
 	revision, err := f.Store.DerivedDataRevision()
 	require.NoError(err)
-	assert.Equal(beforeRevision, revision)
+	assert.Zero(revision)
 	decoded, err := f.Store.RepairListIDs(t.Context(), store.ListIDRepairOptions{}, nil)
 	require.NoError(err)
 	assert.Equal(store.ListIDRepairSummary{Scanned: 1, Found: 1}, decoded)
@@ -496,8 +492,6 @@ func TestPostgreSQLRepairListIDsLocksFingerprintBeforeUpdate(t *testing.T) {
 	messageID := f.CreateMessage("list-id-postgres-fingerprint-lock")
 	require.NoError(f.Store.UpsertMessageRaw(messageID,
 		[]byte("List-Id: <old.example.test>\r\n\r\nbody")))
-	beforeRevision, err := f.Store.DerivedDataRevision()
-	require.NoError(err)
 
 	locked := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -570,7 +564,7 @@ func TestPostgreSQLRepairListIDsLocksFingerprintBeforeUpdate(t *testing.T) {
 	assertListID(t, f, messageID, sql.NullString{String: "<new.example.test>", Valid: true})
 	revision, err := f.Store.DerivedDataRevision()
 	require.NoError(err)
-	assert.Equal(beforeRevision+1, revision)
+	assert.Equal(int64(1), revision)
 	decoded, err := f.Store.RepairListIDs(t.Context(), store.ListIDRepairOptions{}, nil)
 	require.NoError(err)
 	assert.Equal(store.ListIDRepairSummary{Scanned: 1, Found: 1}, decoded)
@@ -585,8 +579,6 @@ func TestRepairListIDsCommitsRevisionWithRepair(t *testing.T) {
 	messageID := f.CreateMessage("list-id-atomic-revision")
 	require.NoError(f.Store.UpsertMessageRaw(messageID,
 		[]byte("List-Id: <atomic.example.test>\r\n\r\nbody")))
-	beforeRevision, err := f.Store.DerivedDataRevision()
-	require.NoError(err)
 
 	summary, err := f.Store.RepairListIDs(t.Context(), store.ListIDRepairOptions{Apply: true}, nil)
 	require.NoError(err)
@@ -594,7 +586,7 @@ func TestRepairListIDsCommitsRevisionWithRepair(t *testing.T) {
 	assertListID(t, f, messageID, sql.NullString{String: "<atomic.example.test>", Valid: true})
 	revision, err := f.Store.DerivedDataRevision()
 	require.NoError(err)
-	assert.Equal(beforeRevision+1, revision)
+	assert.Equal(int64(1), revision)
 }
 
 // TestRepairListIDsBumpsRevisionOnceAcrossBatches catches a per-batch revision

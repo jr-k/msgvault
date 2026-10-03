@@ -56,25 +56,24 @@ type allMatchesManifestProvenance struct {
 }
 
 type allMatchesManifestFilter struct {
-	AccountScopes         []search.AccountScope `json:"account_scopes,omitempty"`
-	Sender                string                `json:"sender,omitempty"`
-	SenderName            string                `json:"sender_name,omitempty"`
-	Recipient             string                `json:"recipient,omitempty"`
-	RecipientName         string                `json:"recipient_name,omitempty"`
-	Domain                string                `json:"domain,omitempty"`
-	Label                 string                `json:"label,omitempty"`
-	ListID                string                `json:"list_id,omitempty"`
-	MessageType           string                `json:"message_type,omitempty"`
-	ConversationID        *int64                `json:"conversation_id,omitzero"`
-	EmptyValueTargets     []string              `json:"empty_value_targets,omitempty"`
-	TimePeriod            string                `json:"time_period,omitempty"`
-	TimeGranularity       string                `json:"time_granularity,omitempty"`
-	SourceID              *int64                `json:"source_id,omitzero"`
-	SourceIDs             []int64               `json:"source_ids,omitempty"`
-	After                 *time.Time            `json:"after,omitempty"`
-	Before                *time.Time            `json:"before,omitempty"`
-	WithAttachmentsOnly   bool                  `json:"attachments_only,omitzero"`
-	HideDeletedFromSource bool                  `json:"hide_deleted_from_source,omitzero"`
+	Sender                string     `json:"sender,omitempty"`
+	SenderName            string     `json:"sender_name,omitempty"`
+	Recipient             string     `json:"recipient,omitempty"`
+	RecipientName         string     `json:"recipient_name,omitempty"`
+	Domain                string     `json:"domain,omitempty"`
+	Label                 string     `json:"label,omitempty"`
+	ListID                string     `json:"list_id,omitempty"`
+	MessageType           string     `json:"message_type,omitempty"`
+	ConversationID        *int64     `json:"conversation_id,omitzero"`
+	EmptyValueTargets     []string   `json:"empty_value_targets,omitempty"`
+	TimePeriod            string     `json:"time_period,omitempty"`
+	TimeGranularity       string     `json:"time_granularity,omitempty"`
+	SourceID              *int64     `json:"source_id,omitzero"`
+	SourceIDs             []int64    `json:"source_ids,omitempty"`
+	After                 *time.Time `json:"after,omitempty"`
+	Before                *time.Time `json:"before,omitempty"`
+	WithAttachmentsOnly   bool       `json:"attachments_only,omitzero"`
+	HideDeletedFromSource bool       `json:"hide_deleted_from_source,omitzero"`
 }
 
 // ActionController handles business logic for actions like deletion and export,
@@ -234,8 +233,7 @@ func manifestMatchFilter(filter query.MessageFilter) allMatchesManifestFilter {
 	}
 	sort.Strings(emptyTargets)
 	return allMatchesManifestFilter{
-		AccountScopes: search.CloneAccountScopes(filter.AccountScopes),
-		Sender:        filter.Sender, SenderName: filter.SenderName,
+		Sender: filter.Sender, SenderName: filter.SenderName,
 		Recipient: filter.Recipient, RecipientName: filter.RecipientName,
 		Domain: filter.Domain, Label: filter.Label, ListID: filter.ListID, MessageType: filter.MessageType,
 		ConversationID: filter.ConversationID, EmptyValueTargets: emptyTargets,
@@ -388,11 +386,6 @@ func (c *ActionController) buildFilterForAggregate(key string, dctx DeletionCont
 	} else if dctx.DrillFilter != nil {
 		// Selected aggregate staging preserves its parent drill-down context.
 		filter = dctx.DrillFilter.Clone()
-	}
-	// Selected aggregate rows retain the displayed virtual account even without
-	// a search query or parent drill-down filter.
-	if dctx.MatchFilter.AccountScopes != nil {
-		filter.AccountScopes = search.CloneAccountScopes(dctx.MatchFilter.AccountScopes)
 	}
 	filter.WithAttachmentsOnly = filter.WithAttachmentsOnly || dctx.MatchFilter.WithAttachmentsOnly
 	filter.HideDeletedFromSource = filter.HideDeletedFromSource || dctx.MatchFilter.HideDeletedFromSource

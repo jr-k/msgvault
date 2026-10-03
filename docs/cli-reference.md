@@ -19,7 +19,7 @@ in your installed binary. This reference follows current `main`; see
 | Export | [export-messages](#export-messages), [export-eml](#export-eml), [export-attachments](#export-attachments), [create-subset](#create-subset) |
 | Review and remove mail | [stage-delete](#stage-delete), [delete-staged](#delete-staged), [deduplicate](#deduplicate), [gc](#gc) |
 | Back up and manage attachment storage | [backup](#backup), [pack-attachments](#pack-attachments), [purge-excluded-media](#purge-excluded-media) |
-| Repair older records | [repair-identity](#repair-identity), [repair-senders](#repair-senders), [repair-message](#repair-message), [repair-derived](#repair-derived), [repair-labels](#repair-labels), [repair-list-ids](#repair-list-ids), [repair-account-attribution](#repair-account-attribution), [repair-dates](#repair-dates) |
+| Repair older records | [repair-identity](#repair-identity), [repair-senders](#repair-senders), [repair-message](#repair-message), [repair-derived](#repair-derived), [repair-labels](#repair-labels), [repair-list-ids](#repair-list-ids), [repair-dates](#repair-dates) |
 | Operate or integrate | [setup](#setup), [daemon](#daemon), [serve](#serve), [activity](#activity), [mcp](#mcp), [query](#query), [openapi](#openapi), [agent-token](#agent-token) |
 
 ## meetings
@@ -3717,7 +3717,9 @@ msgvault repair-derived --source-type beeper
 Repeat `--source-type` or `--identifier` to narrow the source set. Only source
 types with a registered re-derivation pass are supported; an unknown requested
 type is an error. Source syncs also run pending re-derivation passes, so use this
-command for on-demand repair or retrying an interrupted pass.
+command for on-demand repair or retrying an interrupted pass. Every source also
+fills in account attribution for email and calendar rows archived before
+msgvault recorded it, so `received:` and `account:` find them.
 
 ## gc
 
@@ -3782,28 +3784,6 @@ msgvault repair-encoding
 ```
 
 ---
-
-## repair-account-attribution
-
-Derive received/sent email and calendar account attribution for an older archive.
-This command runs through the daemon and rebuilds analytics after completion.
-Confirm source identities first. Conflicting evidence remains unattributed.
-See [forwarded-mail search](usage/searching.md#forwarded-mail-and-virtual-accounts).
-
-```bash
-msgvault repair-account-attribution
-msgvault repair-account-attribution --source-id 3 --page-size 100
-```
-
-| Flag | Description |
-|---|---|
-| `--source-id` | One physical source ID; default `0` repairs all sources |
-| `--page-size` | Messages per committed page; default `100`, range `1–500` |
-
-Each page commits its facts and resume cursor together. Interrupting the command
-preserves committed progress. Repeating a completed repair is a no-op. Identity
-changes recompute indexed matching messages even after repair completes. New
-sync/import writes maintain attribution; searches never read raw MIME.
 
 ## repair-dates
 

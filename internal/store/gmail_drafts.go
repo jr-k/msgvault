@@ -120,7 +120,7 @@ func (s *Store) PersistGmailDraftContext(
 		if data.MIMEAttachmentReplacement != nil {
 			return nil, errors.New("gmail draft persistence cannot replace attachments")
 		}
-		return s.prepareGmailDraftMessage(ctx, tx, receipt.SourceID, data)
+		return prepareGmailDraftMessage(ctx, tx, receipt.SourceID, data)
 	}
 	after := func(ctx context.Context, tx *loggedTx, _ *MessagePersistData, messageID int64) error {
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
@@ -138,7 +138,8 @@ func (s *Store) PersistGmailDraftContext(
 		}
 		return nil
 	}
-	if _, err := s.persistMessageWithParticipantsTransaction(ctx, before, participants, build, prepare, after); err != nil {
+	lock := attributionLock{Sources: []int64{receipt.SourceID}}
+	if _, err := s.persistMessageWithParticipantsTransaction(ctx, lock, before, participants, build, prepare, after); err != nil {
 		return GmailDraft{}, err
 	}
 	return draft, nil
@@ -357,7 +358,7 @@ func (s *Store) PublishGmailDraftReplacementContext(
 		return GmailDraft{}, errors.New("invalid Gmail draft publication")
 	}
 	var published GmailDraft
-	err := gmailDrafts.inTx(ctx, s, draftID, func(tx *loggedTx, draft GmailDraft) error {
+	err := gmailDrafts.inAttributionTx(ctx, s, draftID, func(tx *loggedTx, draft GmailDraft) error {
 		if draft.Revision != revision {
 			return ErrGmailDraftRevision
 		}
@@ -378,7 +379,7 @@ func (s *Store) PublishGmailDraftReplacementContext(
 			if !bytes.Equal(data.RawMIME, draft.Pending.Raw) {
 				return nil, errors.New("replacement MIME does not match the claimed candidate")
 			}
-			return s.prepareGmailDraftMessage(ctx, tx, draft.SourceID, data)
+			return prepareGmailDraftMessage(ctx, tx, draft.SourceID, data)
 		}
 		messageID, err := s.persistMessageWithParticipantsTx(ctx, tx, nil, participants, build, prepare, nil)
 		if err != nil {
@@ -439,7 +440,7 @@ func (s *Store) AdoptGmailDraftObservationContext(
 		return GmailDraft{}, errors.New("invalid Gmail draft observation")
 	}
 	var adopted GmailDraft
-	err := gmailDrafts.inTx(ctx, s, draftID, func(tx *loggedTx, draft GmailDraft) error {
+	err := gmailDrafts.inAttributionTx(ctx, s, draftID, func(tx *loggedTx, draft GmailDraft) error {
 		if draft.Revision != revision {
 			return ErrGmailDraftRevision
 		}
@@ -462,7 +463,7 @@ func (s *Store) AdoptGmailDraftObservationContext(
 				if data == nil || data.Message == nil || data.Message.SourceID != draft.SourceID || data.Message.SourceMessageID != observed.GmailMessageID {
 					return nil, errors.New("observed message identity does not match receipt")
 				}
-				return s.prepareGmailDraftMessage(ctx, tx, draft.SourceID, data)
+				return prepareGmailDraftMessage(ctx, tx, draft.SourceID, data)
 			}
 			after := func(ctx context.Context, tx *loggedTx, data *MessagePersistData, messageID int64) error {
 				if data.MIMEAttachmentReplacement == nil {
@@ -575,7 +576,7 @@ func (s *Store) FinishGmailDraftDeleteContext(
 	return finished, nil
 }
 
-func (s *Store) prepareGmailDraftMessage(
+func prepareGmailDraftMessage(
 	ctx context.Context,
 	tx *loggedTx,
 	sourceID int64,
@@ -595,7 +596,7 @@ func (s *Store) prepareGmailDraftMessage(
 			Info:          LabelInfo{Name: "DRAFT", Type: "system"},
 		})
 	}
-	labelIDs, err := s.ensureMessageLabelRefsWith(ctx, tx, sourceID, refs)
+	labelIDs, err := ensureMessageLabelRefsWith(boundQuerier{ctx: ctx, q: tx}, sourceID, refs, labelFlipsTx(ctx, tx, sourceID))
 	if err != nil {
 		return nil, fmt.Errorf("resolve Gmail draft labels: %w", err)
 	}

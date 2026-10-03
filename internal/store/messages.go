@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"go.kenn.io/msgvault/internal/attachmentpolicy"
+	"go.kenn.io/msgvault/internal/emailattribution"
 	"go.kenn.io/msgvault/internal/mime"
 	"go.kenn.io/msgvault/internal/peoplesweep"
 )
@@ -791,9 +792,6 @@ func (s *Store) listUnresolvedMessageReplies(
 func (s *Store) SetMessageMetadata(messageID int64, metadata sql.NullString) error {
 	ctx := context.Background()
 	return s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
-		}
 		if err := s.lockMeetingEvidenceWith(ctx, tx, messageID); err != nil {
 			return err
 		}
@@ -803,11 +801,7 @@ func (s *Store) SetMessageMetadata(messageID int64, metadata sql.NullString) err
 		if err := setMessageMetadataWith(boundQuerier{ctx: ctx, q: tx}, s.dialect, messageID, metadata); err != nil {
 			return err
 		}
-		if err := s.refreshMeetingProjectionWith(ctx, tx, messageID); err != nil {
-			return err
-		}
-		err := s.refreshAccountAttributionWith(ctx, tx, messageID, nil)
-		return err
+		return s.refreshMeetingProjectionWith(ctx, tx, messageID)
 	})
 }
 
@@ -926,10 +920,7 @@ func (s *Store) updateMessageOnDedup(
 	labelIDs []int64, replaceLabels bool,
 ) (bool, error) {
 	var changed bool
-	err := s.withTx(func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(context.Background(), tx); err != nil {
-			return err
-		}
+	err := s.withMessageAttributionTxContext(context.Background(), messageID, func(tx *loggedTx) error {
 		if err := s.requireSyncMessageSourceTx(tx, messageID); err != nil {
 			return err
 		}
@@ -1247,10 +1238,7 @@ func (s *Store) UpsertMessage(msg *Message) (int64, error) {
 	}
 	ctx := context.Background()
 	var id int64
-	err := s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
-		}
+	err := s.withAttributionTxContext(ctx, attributionLockForMessage(msg.SourceID, msg.MessageType), func(tx *loggedTx) error {
 		q := boundQuerier{ctx: ctx, q: tx}
 		if s.dialect.DriverName() != postgresDriverName {
 			// Reserve the writer before upsertMessageWith reads prior journal state.
@@ -1266,8 +1254,7 @@ func (s *Store) UpsertMessage(msg *Message) (int64, error) {
 		if err := s.refreshMeetingProjectionWith(ctx, tx, id); err != nil {
 			return err
 		}
-		err = s.refreshAccountAttributionWith(ctx, tx, id, nil)
-		return err
+		return s.refreshAccountAttributionAfterWriteTx(ctx, tx, id, deliveryInput{})
 	})
 	return id, err
 }
@@ -1839,9 +1826,10 @@ func (s *Store) PersistMessageContext(ctx context.Context, data *MessagePersistD
 	if data == nil || data.Message == nil {
 		return 0, errors.New("persist message requires a message")
 	}
-	return s.persistMessageWithParticipantsContext(ctx, nil, func([]int64) *MessagePersistData {
-		return data
-	})
+	return s.persistMessageWithParticipantsTransaction(
+		ctx, attributionLockForMessage(data.Message.SourceID, data.Message.MessageType),
+		nil, nil, func([]int64) *MessagePersistData { return data }, nil, nil,
+	)
 }
 
 // PersistMessageWithParticipantsContext resolves participants and persists the
@@ -1855,7 +1843,9 @@ func (s *Store) PersistMessageWithParticipantsContext(
 	if build == nil {
 		return 0, errors.New("persist message requires a participant builder")
 	}
-	return s.persistMessageWithParticipantsContext(ctx, participants, build)
+	// The source is known only after build runs, so this entry locks none.
+	// Meeting archives are the only caller and meeting rows are not derived.
+	return s.persistMessageWithParticipantsTransaction(ctx, attributionLock{}, nil, participants, build, nil, nil)
 }
 
 // PersistRepairMessageWithParticipantsContext atomically replaces one
@@ -1905,8 +1895,9 @@ func (s *Store) PersistRepairMessageWithParticipantsContext(
 				data.Message.SourceID, data.Message.SourceMessageID,
 			)
 		}
-		labelIDs, err := s.ensureMessageLabelRefsWith(
-			ctx, tx, expected.SourceID, data.LabelRefs,
+		labelIDs, err := ensureMessageLabelRefsWith(
+			boundQuerier{ctx: ctx, q: tx}, expected.SourceID, data.LabelRefs,
+			labelFlipsTx(ctx, tx, expected.SourceID),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("resolve repair message labels: %w", err)
@@ -1938,7 +1929,8 @@ func (s *Store) PersistRepairMessageWithParticipantsContext(
 		return nil
 	}
 	messageID, err := s.persistMessageWithParticipantsTransaction(
-		ctx, beforeParticipants, participants, build, prepare, afterPersist,
+		ctx, attributionLock{Sources: []int64{expected.SourceID}},
+		beforeParticipants, participants, build, prepare, afterPersist,
 	)
 	if err != nil {
 		return 0, err
@@ -1946,28 +1938,30 @@ func (s *Store) PersistRepairMessageWithParticipantsContext(
 	return messageID, nil
 }
 
-func (s *Store) persistMessageWithParticipantsContext(
-	ctx context.Context,
-	participants []ParticipantPersistData,
-	build func(participantIDs []int64) *MessagePersistData,
-) (int64, error) {
-	return s.persistMessageWithParticipantsTransaction(ctx, nil, participants, build, nil, nil)
-}
-
 type messagePersistBeforeParticipants func(context.Context, *loggedTx) error
 type messagePersistPrepare func(context.Context, *loggedTx, *MessagePersistData) (*MessagePersistData, error)
 type messagePersistAfter func(context.Context, *loggedTx, *MessagePersistData, int64) error
 
+// persistMessageWithParticipantsTransaction opens the persist transaction
+// through the attribution entry. lock names what the caller already knows
+// before the transaction; phone participants need the exclusive identity lock.
 func (s *Store) persistMessageWithParticipantsTransaction(
 	ctx context.Context,
+	lock attributionLock,
 	beforeParticipants messagePersistBeforeParticipants,
 	participants []ParticipantPersistData,
 	build func(participantIDs []int64) *MessagePersistData,
 	prepare messagePersistPrepare,
 	afterPersist messagePersistAfter,
 ) (int64, error) {
+	for _, participant := range participants {
+		if participant.EmailAddress == "" && participant.PhoneNumber != "" {
+			lock = attributionLock{Exclusive: true}
+			break
+		}
+	}
 	var messageID int64
-	err := s.withTxContext(ctx, func(tx *loggedTx) error {
+	err := s.withAttributionTxContext(ctx, lock, func(tx *loggedTx) error {
 		var err error
 		messageID, err = s.persistMessageWithParticipantsTx(
 			ctx, tx, beforeParticipants, participants, build, prepare, afterPersist,
@@ -1990,9 +1984,6 @@ func (s *Store) persistMessageWithParticipantsTx(
 	afterPersist messagePersistAfter,
 ) (int64, error) {
 	var messageID int64
-	if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-		return 0, err
-	}
 	if s.dialect.DriverName() != postgresDriverName {
 		// Reserve SQLite's writer slot before any prior-state or related
 		// snapshot reads. Otherwise a concurrent commit can leave this
@@ -2008,6 +1999,14 @@ func (s *Store) persistMessageWithParticipantsTx(
 		}
 		if participant.EmailAddress == "" {
 			hasPhoneParticipant = true
+		}
+	}
+	if hasPhoneParticipant {
+		// Phone participants write participant_identifiers, which participant
+		// merges rewrite under the identity lock. Take it before the directory
+		// lock, the same order MergeParticipants uses.
+		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
+			return 0, err
 		}
 	}
 	if len(participants) > 1 || hasPhoneParticipant {
@@ -2184,25 +2183,24 @@ func (s *Store) persistMessageWith(
 			return 0, fmt.Errorf("store labels: %w", err)
 		}
 	}
+	delivery := deliveryInput{}
+	switch {
+	case len(data.RawMIME) > 0 && (data.RawFormat == "" || data.RawFormat == "mime"):
+		delivery = deliveryFromMIME(data.RawMIME)
+	case len(data.RawMIME) > 0:
+		// A non-MIME payload replaced any stored MIME, so its delivery
+		// evidence is gone.
+		delivery = deliveryInput{parsed: &emailattribution.Headers{}}
+	}
+	if err := s.refreshAccountAttributionAfterWriteTx(ctx, tx, messageID, delivery); err != nil {
+		return 0, err
+	}
 	if data.FTS != nil && s.fts5Available {
 		fts := *data.FTS
 		fts.MessageID = messageID
 		if err := s.dialect.FTSUpsert(q, fts); err != nil {
 			return 0, fmt.Errorf("upsert fts: %w", err)
 		}
-	}
-	if len(data.RawMIME) == 0 && len(data.Recipients) > 0 {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM message_account_evidence WHERE message_id=? AND NOT EXISTS(SELECT 1 FROM message_raw WHERE message_id=? AND raw_format='mime')`, messageID, messageID); err != nil {
-			return 0, err
-		}
-	}
-
-	var raw []byte
-	if data.RawFormat == "" || data.RawFormat == "mime" {
-		raw = data.RawMIME
-	}
-	if err := s.refreshAccountAttributionWith(ctx, tx, messageID, raw); err != nil {
-		return 0, err
 	}
 	return messageID, nil
 }
@@ -2383,10 +2381,7 @@ func (s *Store) EnsureParticipantsBatch(addresses []mime.Address) (map[string]in
 // ReplaceMessageRecipients replaces all recipients for a message atomically.
 func (s *Store) ReplaceMessageRecipients(messageID int64, recipientType string, participantIDs []int64, displayNames []string) error {
 	ctx := context.Background()
-	return s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
-		}
+	return s.withMessageAttributionTxContext(ctx, messageID, func(tx *loggedTx) error {
 		if err := s.lockMessageForRecipientWrite(tx, messageID); err != nil {
 			return err
 		}
@@ -2401,15 +2396,14 @@ func (s *Store) ReplaceMessageRecipients(messageID int64, recipientType string, 
 			return err
 		}
 		if recipientType == "from" {
+			// 'from' rows are attribution input: the message upsert's CTE could not
+			// see the envelope rows this call just replaced, and importers on this
+			// granular path never reach persistMessageWith's final recompute.
 			if err := refreshMessageAttributionWith(tx, messageID); err != nil {
 				return err
 			}
 		}
-		// Envelope-only evidence must be rebuilt after a snapshot replacement.
-		if _, err := tx.ExecContext(ctx, `DELETE FROM message_account_evidence WHERE message_id=? AND NOT EXISTS (SELECT 1 FROM message_raw WHERE message_id=? AND raw_format='mime')`, messageID, messageID); err != nil {
-			return err
-		}
-		err := s.refreshAccountAttributionWith(ctx, tx, messageID, nil)
+		_, err := s.refreshAccountAttributionTx(ctx, tx, messageID, deliveryInput{})
 		return err
 	})
 }
@@ -2512,29 +2506,16 @@ func (s *Store) EnsureLabel(
 	sourceLabelID, name, labelType string,
 ) (int64, error) {
 	var id int64
-	err := s.withTxContext(context.Background(), func(tx *loggedTx) error {
-		ctx := context.Background()
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
+	ctx := context.Background()
+	err := s.withAttributionTxContext(ctx, attributionLock{Sources: []int64{sourceID}}, func(tx *loggedTx) error {
+		if err := labelFlipsTx(ctx, tx, sourceID).captureLabels([]string{sourceLabelID}, []string{name}); err != nil {
 			return err
 		}
-		// Standalone callers preserve provider role metadata on canonical-ID
-		// adoption; a name merge keeps the surviving canonical label's role.
-		var role string
-		err := tx.QueryRowContext(ctx, `SELECT COALESCE(system_role,'') FROM labels WHERE source_id=? AND source_label_id=?`, sourceID, sourceLabelID).Scan(&role)
-		if errors.Is(err, sql.ErrNoRows) {
-			err = tx.QueryRowContext(ctx, `SELECT COALESCE(system_role,'') FROM labels WHERE source_id=? AND name=?`, sourceID, name).Scan(&role)
-		}
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		resolved, err := s.ensureLabelsBatchWith(ctx, tx, sourceID, map[string]LabelInfo{
-			sourceLabelID: {Name: name, Type: labelType, SystemRole: role},
-		})
-		if err != nil {
-			return err
-		}
-		id = resolved[sourceLabelID]
-		return nil
+		var txErr error
+		id, txErr = ensureLabelWith(
+			tx, sourceID, sourceLabelID, name, labelType, nil,
+		)
+		return txErr
 	})
 	return id, err
 }
@@ -2726,17 +2707,11 @@ func IsSystemLabel(sourceLabelID string) bool {
 func (s *Store) EnsureLabelsBatch(
 	sourceID int64, labels map[string]LabelInfo,
 ) (map[string]int64, error) {
-	return s.EnsureLabelsBatchContext(context.Background(), sourceID, labels)
-}
-
-// EnsureLabelsBatchContext also refreshes accounts affected by changed Sent roles.
-func (s *Store) EnsureLabelsBatchContext(
-	ctx context.Context, sourceID int64, labels map[string]LabelInfo,
-) (map[string]int64, error) {
 	var result map[string]int64
-	err := s.withTxContext(ctx, func(tx *loggedTx) error {
+	ctx := context.Background()
+	err := s.withAttributionTxContext(ctx, attributionLock{Sources: []int64{sourceID}}, func(tx *loggedTx) error {
 		var err error
-		result, err = s.ensureLabelsBatchWith(ctx, tx, sourceID, labels)
+		result, err = ensureLabelsBatchWith(tx, sourceID, labels, labelFlipsTx(ctx, tx, sourceID))
 		return err
 	})
 	if err != nil {
@@ -2745,111 +2720,20 @@ func (s *Store) EnsureLabelsBatchContext(
 	return result, nil
 }
 
-// ensureLabelsBatchWith captures affected memberships before descriptor merges
-// can remove a label. Only a change to canonical Sent semantics needs repair.
-func (s *Store) ensureLabelsBatchWith(
-	ctx context.Context, tx *loggedTx, sourceID int64, labels map[string]LabelInfo,
-) (map[string]int64, error) {
-	if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-		return nil, err
-	}
-	var sourceType string
-	if err := tx.QueryRowContext(ctx, `SELECT source_type FROM sources WHERE id=?`, sourceID).Scan(&sourceType); err != nil {
-		return nil, fmt.Errorf("read label source: %w", err)
-	}
-	type descriptor struct {
-		id              int64
-		key, name, role string
-	}
-	byKey := make(map[string]descriptor)
-	byName := make(map[string]descriptor)
-	rows, err := tx.QueryContext(ctx, `SELECT id,COALESCE(source_label_id,''),name,COALESCE(system_role,'') FROM labels WHERE source_id=?`, sourceID)
-	if err != nil {
-		return nil, fmt.Errorf("read label roles: %w", err)
-	}
-	for rows.Next() {
-		var d descriptor
-		if err := rows.Scan(&d.id, &d.key, &d.name, &d.role); err != nil {
-			_ = rows.Close()
-			return nil, err
-		}
-		byKey[d.key], byName[d.name] = d, d
-	}
-	err = rows.Err()
-	_ = rows.Close()
-	if err != nil {
-		return nil, err
-	}
-	isSent := func(key, role string) bool {
-		return role == LabelSystemRoleSent || (sourceType == "gmail" && key == "SENT")
-	}
-	affectedLabels := make(map[int64]struct{})
-	for key, info := range labels {
-		wantSent := isSent(key, info.SystemRole)
-		if old, ok := byKey[key]; ok && isSent(old.key, old.role) != wantSent {
-			affectedLabels[old.id] = struct{}{}
-		}
-		if old, ok := byName[info.Name]; ok && old.key != key {
-			// Snapshot cross-renames move this name away before any merge.
-			if incoming, renamed := labels[old.key]; renamed && incoming.Name != old.name {
-				continue
-			}
-			if isSent(old.key, old.role) != wantSent {
-				affectedLabels[old.id] = struct{}{}
-			}
-		}
-	}
-	labelIDs := make([]int64, 0, len(affectedLabels))
-	for id := range affectedLabels {
-		labelIDs = append(labelIDs, id)
-	}
-	slices.Sort(labelIDs)
-	messageIDs := make(map[int64]struct{})
-	for len(labelIDs) > 0 {
-		n := min(len(labelIDs), 900)
-		args := make([]any, n)
-		for i, id := range labelIDs[:n] {
-			args[i] = id
-		}
-		rows, err := tx.QueryContext(ctx, `SELECT message_id FROM message_labels WHERE label_id IN (`+strings.TrimSuffix(strings.Repeat("?,", n), ",")+`) GROUP BY message_id`, args...)
-		if err != nil {
-			return nil, fmt.Errorf("read messages affected by label role: %w", err)
-		}
-		for rows.Next() {
-			var id int64
-			if err := rows.Scan(&id); err != nil {
-				_ = rows.Close()
-				return nil, err
-			}
-			messageIDs[id] = struct{}{}
-		}
-		err = rows.Err()
-		_ = rows.Close()
-		if err != nil {
-			return nil, err
-		}
-		labelIDs = labelIDs[n:]
-	}
-	result, err := ensureLabelsBatchWith(boundQuerier{ctx: ctx, q: tx}, sourceID, labels)
-	if err != nil {
-		return nil, err
-	}
-	ordered := make([]int64, 0, len(messageIDs))
-	for id := range messageIDs {
-		ordered = append(ordered, id)
-	}
-	slices.Sort(ordered)
-	for _, id := range ordered {
-		if err := s.refreshAccountAttributionWith(ctx, tx, id, nil); err != nil {
-			return nil, fmt.Errorf("refresh account after label role change: %w", err)
-		}
-	}
-	return result, nil
-}
-
+// ensureLabelsBatchWith captures the Sent evidence of every label it can
+// touch into flips, which the attribution entry applies before commit.
 func ensureLabelsBatchWith(
-	q querier, sourceID int64, labels map[string]LabelInfo,
+	q querier, sourceID int64, labels map[string]LabelInfo, flips *labelSentFlips,
 ) (map[string]int64, error) {
+	sourceLabelIDs := make([]string, 0, len(labels))
+	names := make([]string, 0, len(labels))
+	for sourceLabelID, info := range labels {
+		sourceLabelIDs = append(sourceLabelIDs, sourceLabelID)
+		names = append(names, info.Name)
+	}
+	if err := flips.captureLabels(sourceLabelIDs, names); err != nil {
+		return nil, err
+	}
 	result := make(map[string]int64, len(labels))
 	// Phase 1: Move all renamed labels to temporary names so that cross-renames
 	// do not merge labels that are both present in this snapshot.
@@ -2886,8 +2770,8 @@ func ensureLabelsBatchWith(
 	return result, nil
 }
 
-func (s *Store) ensureMessageLabelRefsWith(
-	ctx context.Context, tx *loggedTx, sourceID int64, refs []MessageLabelRef,
+func ensureMessageLabelRefsWith(
+	q querier, sourceID int64, refs []MessageLabelRef, flips *labelSentFlips,
 ) ([]int64, error) {
 	labels := make(map[string]LabelInfo, len(refs))
 	for _, ref := range refs {
@@ -2896,7 +2780,7 @@ func (s *Store) ensureMessageLabelRefsWith(
 		}
 		labels[ref.SourceLabelID] = ref.Info
 	}
-	resolved, err := s.ensureLabelsBatchWith(ctx, tx, sourceID, labels)
+	resolved, err := ensureLabelsBatchWith(q, sourceID, labels, flips)
 	if err != nil {
 		return nil, err
 	}
@@ -2934,15 +2818,10 @@ func (s *Store) MessageLabelIDsContext(ctx context.Context, messageID int64) ([]
 // ReplaceMessageLabels replaces all labels for a message atomically.
 func (s *Store) ReplaceMessageLabels(messageID int64, labelIDs []int64) error {
 	ctx := context.Background()
-	return s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
-		}
-		if err := replaceMessageLabelsTx(boundQuerier{ctx: ctx, q: tx}, messageID, labelIDs); err != nil {
-			return err
-		}
-		err := s.refreshAccountAttributionWith(ctx, tx, messageID, nil)
-		return err
+	return s.withMessageAttributionTxContext(ctx, messageID, func(tx *loggedTx) error {
+		return s.refreshAccountAttributionIfSentChangedTx(ctx, tx, messageID, func() error {
+			return replaceMessageLabelsTx(tx, messageID, labelIDs)
+		})
 	})
 }
 
@@ -2952,10 +2831,7 @@ func (s *Store) ReconcileMessageLabels(
 	messageID int64, labelIDs []int64, replace bool,
 ) (bool, error) {
 	var changed bool
-	err := s.withTx(func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(context.Background(), tx); err != nil {
-			return err
-		}
+	err := s.withMessageAttributionTxContext(context.Background(), messageID, func(tx *loggedTx) error {
 		var err error
 		changed, err = s.reconcileMessageLabelsTx(
 			tx, messageID, labelIDs, replace)
@@ -2983,9 +2859,6 @@ func (s *Store) reconcileMessageLabelsTx(
 func (s *Store) reconcileMessageLabelsTxContext(
 	ctx context.Context, tx *loggedTx, messageID int64, labelIDs []int64, replace bool,
 ) (bool, error) {
-	if err := s.lockMessageForRecipientWrite(boundQuerier{ctx: ctx, q: tx}, messageID); err != nil {
-		return false, err
-	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT label_id FROM message_labels WHERE message_id = ?
 	`, messageID)
@@ -3028,13 +2901,12 @@ func (s *Store) reconcileMessageLabelsTxContext(
 		if !changed {
 			return false, nil
 		}
-		if err := replaceMessageLabelsTx(
-			boundQuerier{ctx: ctx, q: tx}, messageID, labelIDs,
-		); err != nil {
+		if err := s.refreshAccountAttributionIfSentChangedTx(ctx, tx, messageID, func() error {
+			return replaceMessageLabelsTx(boundQuerier{ctx: ctx, q: tx}, messageID, labelIDs)
+		}); err != nil {
 			return false, err
 		}
-		err = s.refreshAccountAttributionWith(ctx, tx, messageID, nil)
-		return true, err
+		return true, nil
 	}
 
 	missing := make([]int64, 0, len(desired))
@@ -3046,11 +2918,12 @@ func (s *Store) reconcileMessageLabelsTxContext(
 	if len(missing) == 0 {
 		return false, nil
 	}
-	if err := s.addMessageLabelsTx(boundQuerier{ctx: ctx, q: tx}, messageID, missing); err != nil {
+	if err := s.refreshAccountAttributionIfSentChangedTx(ctx, tx, messageID, func() error {
+		return s.addMessageLabelsTx(boundQuerier{ctx: ctx, q: tx}, messageID, missing)
+	}); err != nil {
 		return false, err
 	}
-	err = s.refreshAccountAttributionWith(ctx, tx, messageID, nil)
-	return true, err
+	return true, nil
 }
 
 func replaceMessageLabelsTx(tx querier, messageID int64, labelIDs []int64) error {
@@ -3086,10 +2959,7 @@ func (s *Store) AddMessageLabels(messageID int64, labelIDs []int64) error {
 	if len(labelIDs) == 0 {
 		return nil
 	}
-	return s.withTx(func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(context.Background(), tx); err != nil {
-			return err
-		}
+	return s.withMessageAttributionTxContext(context.Background(), messageID, func(tx *loggedTx) error {
 		changed, err := s.reconcileMessageLabelsTx(
 			tx, messageID, labelIDs, false,
 		)
@@ -3134,19 +3004,14 @@ func (s *Store) RemoveMessageLabels(messageID int64, labelIDs []int64) error {
 		return nil
 	}
 	ctx := context.Background()
-	return s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
+	return s.withMessageAttributionTxContext(ctx, messageID, func(tx *loggedTx) error {
+		if err := s.requireSyncMessageSourceTx(tx, messageID); err != nil {
 			return err
 		}
-		q := boundQuerier{ctx: ctx, q: tx}
-		if err := s.requireSyncMessageSourceTx(q, messageID); err != nil {
-			return err
-		}
-		if err := execInChunksContext(ctx, tx, labelIDs, []any{messageID}, `DELETE FROM message_labels WHERE message_id=? AND label_id IN (%s)`); err != nil {
-			return err
-		}
-		err := s.refreshAccountAttributionWith(ctx, tx, messageID, nil)
-		return err
+		return s.refreshAccountAttributionIfSentChangedTx(ctx, tx, messageID, func() error {
+			return execInChunks(tx, labelIDs, []any{messageID},
+				`DELETE FROM message_labels WHERE message_id = ? AND label_id IN (%s)`)
+		})
 	})
 }
 
@@ -4467,12 +4332,11 @@ func (s *Store) MergeParticipants(oldID, newID int64) error {
 	if oldID == newID || oldID == 0 || newID == 0 {
 		return nil
 	}
-	return s.withTx(func(tx *loggedTx) error {
-		// Serialize the curated binding check with promotion and link/unlink
-		// mutations before this transaction repoints any archive references.
-		if err := s.lockIdentityMutationTx(tx); err != nil {
-			return err
-		}
+	// The exclusive attribution entry takes the identity row before the sync
+	// fence, serializing the curated binding check with promotion and
+	// link/unlink mutations before this transaction repoints any references.
+	ctx := context.Background()
+	return s.withAttributionTxContext(ctx, attributionLock{Exclusive: true}, func(tx *loggedTx) error {
 		if err := s.lockParticipantDirectoryMutationTxContext(
 			context.Background(), tx,
 		); err != nil {
@@ -4591,6 +4455,9 @@ func (s *Store) MergeParticipants(oldID, newID int64) error {
 		if err := refreshParticipantMessageAttributionContext(
 			context.Background(), tx, newID,
 		); err != nil {
+			return err
+		}
+		if err := s.refreshAccountAttributionForParticipantsTx(ctx, tx, []int64{oldID, newID}); err != nil {
 			return err
 		}
 		// Repoint (and, if needed, restructure) any link edges referencing
@@ -4802,26 +4669,28 @@ func (s *Store) SetParticipantIdentifier(participantID int64, identifierType, id
 	if identifierType == "" || identifierValue == "" {
 		return errors.New("identifier type and value are required")
 	}
-	return s.withTx(func(tx *loggedTx) error {
-		// Fast path first, read-only: importer re-runs hit the no-op case
-		// constantly, and it must not take any write lock.
+	ctx := context.Background()
+	// Fast path first, read-only and outside any write transaction: importer
+	// re-runs hit the no-op case constantly, and it must not take any lock.
+	noop := false
+	if err := s.withTxOptionsContext(ctx, &sql.TxOptions{ReadOnly: true}, func(tx *loggedTx) error {
 		existingParticipantID, exists, err := participantIdentifierTargetTx(
 			tx, identifierType, identifierValue,
 		)
-		if err != nil || (exists && existingParticipantID == participantID) {
-			return err
-		}
-		// The write path may bump the identity revision below (owner
-		// evidence), so the identity-mutation row lock must come BEFORE the
-		// participant_identifiers write: BeginExclusive takes that row and
-		// then LOCK TABLE participant_identifiers, and the reverse order
-		// here would deadlock against a serialized source removal. Re-check
-		// the no-op case under the lock: a concurrent call may have set the
-		// same mapping while we waited.
-		if err := s.lockIdentityMutationTx(tx); err != nil {
-			return err
-		}
-		existingParticipantID, exists, err = participantIdentifierTargetTx(
+		noop = exists && existingParticipantID == participantID
+		return err
+	}); err != nil || noop {
+		return err
+	}
+	// The write path may bump the identity revision below (owner evidence),
+	// so the exclusive attribution entry takes the identity row BEFORE the
+	// sync fence and the participant_identifiers write: BeginExclusive takes
+	// that row and then LOCK TABLE participant_identifiers, and the reverse
+	// order would deadlock against a serialized source removal. Re-check the
+	// no-op case under the lock: a concurrent call may have set the same
+	// mapping while we waited.
+	return s.withAttributionTxContext(ctx, attributionLock{Exclusive: true}, func(tx *loggedTx) error {
+		existingParticipantID, exists, err := participantIdentifierTargetTx(
 			tx, identifierType, identifierValue,
 		)
 		if err != nil || (exists && existingParticipantID == participantID) {
@@ -4887,6 +4756,9 @@ func (s *Store) SetParticipantIdentifier(participantID int64, identifierType, id
 		); err != nil {
 			return err
 		}
+		if err := s.refreshAccountAttributionForParticipantsTx(ctx, tx, []int64{existingParticipantID, participantID}); err != nil {
+			return err
+		}
 		if _, err := s.bumpIdentityRevision(tx); err != nil {
 			return err
 		}
@@ -4915,10 +4787,8 @@ func (s *Store) RepairParticipantEmailAddresses(repairs []ParticipantEmailRepair
 	if len(repairs) == 0 {
 		return nil
 	}
-	return s.withTx(func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTx(tx); err != nil {
-			return err
-		}
+	ctx := context.Background()
+	return s.withAttributionTxContext(ctx, attributionLock{Exclusive: true}, func(tx *loggedTx) error {
 		participantIDs := make([]int64, 0, len(repairs))
 		for _, repair := range repairs {
 			result, err := tx.Exec(
@@ -4944,6 +4814,9 @@ func (s *Store) RepairParticipantEmailAddresses(repairs []ParticipantEmailRepair
 			if err := refreshParticipantMessageAttributionContext(
 				context.Background(), tx, participantIDs[start:end]...,
 			); err != nil {
+				return err
+			}
+			if err := s.refreshAccountAttributionForParticipantsTx(ctx, tx, participantIDs[start:end]); err != nil {
 				return err
 			}
 		}
@@ -5699,15 +5572,35 @@ func (s *Store) ReplaceReactions(messageID int64, reactions []ReactionRef) error
 // Unlike UpsertMessageRaw (which hardcodes 'mime'), this accepts the format as a parameter.
 func (s *Store) UpsertMessageRawWithFormat(messageID int64, rawData []byte, format string) error {
 	ctx := context.Background()
-	return s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
+	// Delivery evidence comes only from MIME, so a write that neither stores
+	// MIME nor replaces it leaves attribution alone and takes no lock.
+	storedMIME := func(q querier) (bool, error) {
+		var stored int
+		err := q.QueryRow(`SELECT 1 FROM message_raw WHERE message_id = ? AND raw_format = 'mime'`, messageID).Scan(&stored)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
 		}
+		if err != nil {
+			return false, fmt.Errorf("read raw format of message %d: %w", messageID, err)
+		}
+		return true, nil
+	}
+	write := func(tx *loggedTx) error {
 		if err := s.lockMeetingEvidenceWith(ctx, tx, messageID); err != nil {
 			return err
 		}
 		if err := s.requireSyncMessageSourceTx(boundQuerier{ctx: ctx, q: tx}, messageID); err != nil {
 			return err
+		}
+		replacesMIME := false
+		if format != "mime" {
+			var err error
+			if replacesMIME, err = storedMIME(boundQuerier{ctx: ctx, q: tx}); err != nil {
+				return err
+			}
+			if replacesMIME && tx.attribution == nil {
+				return errRawNeedsAttributionLock
+			}
 		}
 		if err := upsertMessageRawWithFormat(boundQuerier{ctx: ctx, q: tx}, messageID, rawData, format); err != nil {
 			return err
@@ -5715,13 +5608,35 @@ func (s *Store) UpsertMessageRawWithFormat(messageID int64, rawData []byte, form
 		if err := s.refreshMeetingProjectionWith(ctx, tx, messageID); err != nil {
 			return err
 		}
-		if format != "mime" {
-			return nil
+		switch {
+		case format == "mime":
+			return s.refreshAccountAttributionAfterWriteTx(ctx, tx, messageID, deliveryFromMIME(rawData))
+		case replacesMIME:
+			return s.refreshAccountAttributionAfterWriteTx(ctx, tx, messageID,
+				deliveryInput{parsed: &emailattribution.Headers{}})
 		}
-		err := s.refreshAccountAttributionWith(ctx, tx, messageID, rawData)
-		return err
-	})
+		return nil
+	}
+	if format != "mime" {
+		replacesMIME, err := storedMIME(boundQuerier{ctx: ctx, q: s.db})
+		if err != nil {
+			return err
+		}
+		if !replacesMIME {
+			// A MIME write that lands after this read sends the write back
+			// through the attribution entry below.
+			err := s.withTxContext(ctx, write)
+			if !errors.Is(err, errRawNeedsAttributionLock) {
+				return err
+			}
+		}
+	}
+	return s.withMessageAttributionTxContext(ctx, messageID, write)
 }
+
+// errRawNeedsAttributionLock rolls back a non-MIME raw write that found MIME
+// to replace, so it can retry holding the message's source lock.
+var errRawNeedsAttributionLock = errors.New("raw write replaces MIME and needs the attribution lock")
 
 // AttachmentPathsUniqueToSource returns local content and thumbnail paths for
 // blobs referenced by sourceID and by no other source. Sharing is checked

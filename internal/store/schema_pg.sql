@@ -1366,7 +1366,6 @@ CREATE TABLE IF NOT EXISTS messages (
     identity_is_from_me BOOLEAN NOT NULL DEFAULT FALSE,
     account_address TEXT,
     account_path TEXT,
-    account_attribution_basis TEXT NOT NULL DEFAULT 'not-derived',
 
     subject TEXT,
     snippet TEXT,
@@ -4095,22 +4094,14 @@ CREATE INDEX IF NOT EXISTS idx_meeting_actions_status
 CREATE INDEX IF NOT EXISTS idx_meeting_actions_assignee
     ON meeting_action_items(assignee_email, message_id, ordinal);
 
--- Recomputable account attribution; raw message provenance remains unchanged.
-CREATE TABLE IF NOT EXISTS message_account_evidence (
-    message_id BIGINT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
-    evidence TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS message_account_mentions (
-    source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+-- Delivery-header addresses read from each email's stored MIME. Account
+-- attribution derives messages.account_address from them; they are hints
+-- about routing, not proof of ownership.
+CREATE TABLE IF NOT EXISTS message_delivery_addresses (
     message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-    address_key TEXT NOT NULL,
-    PRIMARY KEY(message_id, address_key)
+    kind TEXT NOT NULL,      -- 'original' or 'delivered'
+    address TEXT NOT NULL,   -- lowercased mailbox
+    PRIMARY KEY (message_id, kind, address)
 );
-CREATE INDEX IF NOT EXISTS idx_account_mentions_address ON message_account_mentions(source_id, address_key, message_id);
-CREATE TABLE IF NOT EXISTS account_attribution_repair_progress (
-    source_id BIGINT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
-    last_message_id BIGINT NOT NULL DEFAULT 0,
-    high_water_id BIGINT NOT NULL,
-    rule_version INTEGER NOT NULL,
-    completed INTEGER NOT NULL DEFAULT 0
-);
+CREATE INDEX IF NOT EXISTS idx_message_delivery_addresses_address
+    ON message_delivery_addresses(address, message_id);

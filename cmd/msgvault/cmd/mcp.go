@@ -16,7 +16,6 @@ import (
 	"go.kenn.io/msgvault/internal/daemonclient"
 	"go.kenn.io/msgvault/internal/deletion"
 	mcpserver "go.kenn.io/msgvault/internal/mcp"
-	"go.kenn.io/msgvault/internal/search"
 	"go.kenn.io/msgvault/internal/vector/visual"
 	"go.kenn.io/msgvault/pkg/client/generated"
 )
@@ -310,7 +309,6 @@ func (s daemonMCPSimilarSearcher) FindSimilar(
 ) (*mcpserver.SimilarSearchResult, error) {
 	resp, err := s.client.FindSimilarMessages(ctx, daemonclient.SimilarSearchRequest{
 		MessageID:     req.MessageID,
-		AccountScopes: search.CloneAccountScopes(req.AccountScopes),
 		Limit:         req.Limit,
 		Account:       req.Account,
 		MessageType:   req.MessageType,

@@ -3,6 +3,7 @@ package hybrid
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -40,11 +41,13 @@ func BuildFilter(ctx context.Context, db *sql.DB, rebind func(string) string, q 
 	if q == nil {
 		return f, nil
 	}
+	if len(q.AccountAddrs) > 0 || len(q.ReceivedAddrs) > 0 {
+		return f, errors.New("account: and received: filters are not supported in vector or hybrid search yet; use --mode=fts")
+	}
 	if rebind == nil {
 		rebind = identityRebind
 	}
 
-	f.AccountScopes = search.CloneAccountScopes(q.AccountScopes)
 	groupFilters := []struct {
 		addrs []string
 		dst   *[][]int64
@@ -140,7 +143,6 @@ func ApplyMessageFilter(
 		}
 	}
 
-	f.AccountScopes = append(f.AccountScopes, search.CloneAccountScopes(structured.AccountScopes)...)
 	derived := query.MergeFilterIntoQuery(&search.Query{}, structured)
 	intersectSourceIDs(f, derived.AccountIDs)
 	intersectConversationIDs(f, derived.ConversationIDs)

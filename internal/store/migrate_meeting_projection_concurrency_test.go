@@ -217,12 +217,18 @@ func TestMeetingProjectionPublicRawWritesLockMessageBeforeRaw(t *testing.T) {
 			requirements := require.New(t)
 			base := newRFC822IDBackfillBackendStore(t)
 			_, id := projectionFixture(t, base, "raw-lock", "meeting_json", meetingProjectionRaw)
-			statement := make(chan struct{}, 1)
-			var statements []string
+			statement := make(chan string, 1)
 			var once sync.Once
 			gate := &meetingProjectionGate{before: func(_ context.Context, query string, _ []driver.NamedValue) error {
-				statements = append(statements, query)
-				once.Do(func() { statement <- struct{}{} })
+				// A MIME write first opens the account-attribution entry: the
+				// pre-transaction source read, the identity share and, on
+				// PostgreSQL, the source row lock all precede the message lock.
+				if strings.Contains(query, "SELECT source_id FROM messages WHERE id") ||
+					strings.Contains(query, "FROM archive_metadata") ||
+					(base.IsPostgreSQL() && strings.Contains(query, "UPDATE sources SET updated_at")) {
+					return nil
+				}
+				once.Do(func() { statement <- query })
 				return nil
 			}}
 			st := gatedMeetingProjectionStore(t, base, gate)
@@ -241,7 +247,16 @@ func TestMeetingProjectionPublicRawWritesLockMessageBeforeRaw(t *testing.T) {
 				}
 			}()
 			select {
-			case <-statement:
+			case first := <-statement:
+				if base.IsPostgreSQL() {
+					assertions.Contains(first, "FROM messages WHERE id =")
+					assertions.Contains(first, "FOR UPDATE")
+				} else if mime {
+					// The source row lock reserves SQLite's writer first.
+					assertions.Contains(first, "UPDATE sources SET updated_at")
+				} else {
+					assertions.Contains(first, "UPDATE embedding_change_clock")
+				}
 			case <-ctx.Done():
 				requirements.NoError(ctx.Err(), "raw write did not attempt its first statement")
 			}
@@ -252,24 +267,6 @@ func TestMeetingProjectionPublicRawWritesLockMessageBeforeRaw(t *testing.T) {
 			case <-ctx.Done():
 				requirements.NoError(ctx.Err(), "raw write did not finish")
 			}
-			// Identity serialization precedes the meeting lock. Verify the lock
-			// protects the first raw access through the real database driver.
-			lockIndex, rawIndex := -1, -1
-			for i, query := range statements {
-				isLock := strings.HasPrefix(query, "UPDATE embedding_change_clock")
-				if base.IsPostgreSQL() {
-					isLock = strings.Contains(query, "FROM messages WHERE id =") && strings.Contains(query, "FOR UPDATE")
-				}
-				if isLock && lockIndex < 0 {
-					lockIndex = i
-				}
-				if strings.Contains(query, "message_raw") && rawIndex < 0 {
-					rawIndex = i
-				}
-			}
-			requirements.GreaterOrEqual(lockIndex, 0, "message/writer lock observed")
-			requirements.GreaterOrEqual(rawIndex, 0, "raw access observed")
-			assertions.Less(lockIndex, rawIndex, "lock precedes raw access")
 			content, _ := readProjection(t, base, id)
 			assertions.Empty(content.Actions)
 		})

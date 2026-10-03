@@ -14,458 +14,1092 @@ import (
 	"go.kenn.io/msgvault/internal/emailattribution"
 )
 
-const accountAttributionRuleVersion = 1
+// Account attribution maps each email and calendar row to the confirmed
+// account that received or sent it: messages.account_address plus
+// messages.account_path. account_path IS NULL marks a row whose attribution is
+// still pending; the account-attribution re-derivation pass fills it in.
+const (
+	accountPathInbound  = "inbound"
+	accountPathSent     = "sent"
+	accountPathCalendar = "calendar"
 
-type AccountAttributionProgress struct {
-	SourceID      int64 `json:"source_id"`
-	LastMessageID int64 `json:"last_message_id"`
-	HighWaterID   int64 `json:"high_water_id"`
-	Completed     bool  `json:"completed"`
-	Scanned       int64 `json:"scanned"`
+	// accountHeaderRawPrefix bounds the stored blob bytes read for one header
+	// block. The slack lets a compressed prefix decode past MaxHeaderBytes.
+	accountHeaderRawPrefix = emailattribution.MaxHeaderBytes + 64<<10
+
+	deliveryKindOriginal  = "original"
+	deliveryKindDelivered = "delivered"
+
+	accountRepairPageSize = 500
+)
+
+var (
+	// errAttributionLockMissing means a transaction tried to derive a row
+	// whose source it did not lock through withAttributionTxContext.
+	errAttributionLockMissing = errors.New("account attribution requires the source lock")
+	// errAttributionLockUpgrade means a shared attribution transaction asked
+	// for the exclusive identity lock, which would invert the lock order.
+	errAttributionLockUpgrade = errors.New("shared account attribution transaction cannot take the exclusive identity lock")
+)
+
+// attributionLock names the locks a transaction takes before the sync fence.
+// Exclusive takes the identity row for writing and excludes every other
+// attribution transaction, so it lists no sources.
+type attributionLock struct {
+	Exclusive bool
+	Sources   []int64
 }
 
-func (s *Store) ensureAccountAttributionSchema(ctx context.Context) error {
-	return s.runOnceMigration(ctx, "account_attribution_schema_v1", 1, false, func(ctx context.Context) error {
-		// Index builds can exceed the PostgreSQL pool timeout on existing archives.
-		return s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
-			viewPrefix := "CREATE VIEW IF NOT EXISTS"
-			if s.IsPostgreSQL() {
-				viewPrefix = "CREATE OR REPLACE VIEW"
+type attributionLockState struct {
+	exclusive bool
+	sources   map[int64]struct{}
+	// flips are label-definition changes the entry applies before commit.
+	flips []*labelSentFlips
+}
+
+func (st *attributionLockState) holds(sourceID int64) bool {
+	if st == nil {
+		return false
+	}
+	if st.exclusive {
+		return true
+	}
+	_, ok := st.sources[sourceID]
+	return ok
+}
+
+// withAttributionTxContext opens every transaction that derives attribution
+// or changes an input some message's attribution reads. Lock order is the
+// identity row (shared or exclusive), then each listed source row ascending,
+// then the sync fence, then fn.
+func (s *Store) withAttributionTxContext(
+	ctx context.Context, lock attributionLock, fn func(*loggedTx) error,
+) error {
+	sources := slices.Clone(lock.Sources)
+	slices.Sort(sources)
+	sources = slices.Compact(sources)
+	if lock.Exclusive {
+		sources = nil
+	}
+	return s.withTxLockedContext(ctx, nil, func(tx *loggedTx) error {
+		if lock.Exclusive {
+			if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
+				return err
 			}
-			for _, stmt := range []string{
-				`CREATE INDEX IF NOT EXISTS idx_messages_account_address ON messages(account_address, sent_at, id)`,
-				`CREATE INDEX IF NOT EXISTS idx_messages_source_account ON messages(source_id, account_address, sent_at, id)`,
-				`CREATE INDEX IF NOT EXISTS idx_messages_account_pending ON messages(source_id,id) WHERE account_attribution_basis='not-derived'`,
-				viewPrefix + ` account_identity_group_memberships AS SELECT ai.source_id, 'fastmail-masked:' || LOWER(src.identifier) AS group_key, ai.address_key FROM account_identities ai JOIN sources src ON src.id = ai.source_id WHERE (',' || ai.source_signal || ',') LIKE '%,fastmail-masked-email,%'`,
-			} {
-				if _, err := tx.ExecContext(ctx, stmt); err != nil {
-					return fmt.Errorf("install account attribution: %w", err)
-				}
+		} else if err := s.shareIdentityLockTxContext(ctx, tx); err != nil {
+			return err
+		}
+		state := &attributionLockState{exclusive: lock.Exclusive, sources: make(map[int64]struct{}, len(sources))}
+		for _, sourceID := range sources {
+			// The same row lock lockSyncSourceTx takes. A missing source has
+			// no rows to derive, so callers keep reporting their own error.
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE sources SET updated_at = updated_at WHERE id = ?`, sourceID); err != nil {
+				return fmt.Errorf("lock source %d for account attribution: %w", sourceID, err)
 			}
-			return nil
-		})
+			state.sources[sourceID] = struct{}{}
+		}
+		tx.attribution = state
+		if s.attributionAfterLockHook != nil {
+			s.attributionAfterLockHook(sources)
+		}
+		return nil
+	}, func(tx *loggedTx) error {
+		if err := fn(tx); err != nil {
+			return err
+		}
+		for _, flips := range tx.attribution.flips {
+			if err := s.applyLabelSentFlipsTx(flips); err != nil {
+				return err
+			}
+		}
+		tx.attribution.flips = nil
+		return nil
 	})
 }
 
-func (s *Store) GetAccountAttributionContext(ctx context.Context, id int64) (emailattribution.Result, error) {
-	var address, path sql.NullString
-	var basis string
-	err := s.db.QueryRowContext(ctx, `SELECT account_address, account_path, account_attribution_basis FROM messages WHERE id = ?`, id).Scan(&address, &path, &basis)
-	return emailattribution.Result{Address: address.String, Path: path.String, Basis: basis}, err
+// attributionLockForMessage is the shared lock a write of one message needs:
+// its source when the row is email or calendar, nothing otherwise.
+func attributionLockForMessage(sourceID int64, messageType string) attributionLock {
+	if (IsEmailMessageType(messageType) || messageType == "calendar_event") && sourceID > 0 {
+		return attributionLock{Sources: []int64{sourceID}}
+	}
+	return attributionLock{}
 }
 
-// refreshAccountAttributionWith uses compact evidence once available. It never
-// reads message bodies, and identity updates need no MIME decompression.
-func (s *Store) refreshAccountAttributionWith(ctx context.Context, tx *loggedTx, id int64, raw []byte) error {
-	var sourceID int64
-	var sourceType, identifier string
-	var messageType sql.NullString
-	var metadata, config, oldAddress, oldPath sql.NullString
-	var oldBasis string
-	var sent bool
-	lockClause := ""
-	if s.IsPostgreSQL() {
-		lockClause = " FOR UPDATE OF m"
+// labelFlipsTx returns a collector the transaction's attribution entry applies
+// before commit, or nil outside an attribution transaction.
+func labelFlipsTx(ctx context.Context, tx *loggedTx, sourceID int64) *labelSentFlips {
+	if tx.attribution == nil {
+		return nil
 	}
-	err := tx.QueryRowContext(ctx, `SELECT m.source_id, m.message_type, src.source_type, src.identifier, m.metadata, src.sync_config,
-  EXISTS (SELECT 1 FROM message_labels ml JOIN labels l ON l.id=ml.label_id WHERE ml.message_id=m.id AND (l.system_role='sent' OR (src.source_type='gmail' AND l.source_label_id='SENT'))),
-  m.account_address, m.account_path, m.account_attribution_basis
-  FROM messages m JOIN sources src ON src.id=m.source_id WHERE m.id=?`+lockClause, id).Scan(&sourceID, &messageType, &sourceType, &identifier, &metadata, &config, &sent, &oldAddress, &oldPath, &oldBasis)
+	flips := newLabelSentFlips(ctx, tx, sourceID)
+	tx.attribution.flips = append(tx.attribution.flips, flips)
+	return flips
+}
+
+// refreshAccountAttributionAfterWriteTx derives a row a write just stored.
+// A transaction that could not name the row's source before it began leaves
+// the row pending for the account-attribution pass instead.
+func (s *Store) refreshAccountAttributionAfterWriteTx(
+	ctx context.Context, tx *loggedTx, id int64, delivery deliveryInput,
+) error {
+	var sourceID int64
+	var messageType string
+	err := tx.QueryRowContext(ctx,
+		`SELECT source_id, COALESCE(message_type, '') FROM messages WHERE id = ?`, id,
+	).Scan(&sourceID, &messageType)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("read account attribution input: %w", err)
+		return fmt.Errorf("read message %d for account attribution: %w", id, err)
 	}
-	typ := messageType.String
-	if typ == "" {
-		typ = MessageTypeEmail
-	}
-	if typ != MessageTypeEmail && typ != "calendar_event" && oldBasis == "not-derived" && !oldAddress.Valid && !oldPath.Valid {
+	if (IsEmailMessageType(messageType) || messageType == "calendar_event") && !tx.attribution.holds(sourceID) {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE messages SET account_address = NULL, account_path = NULL
+			WHERE id = ? AND (account_address IS NOT NULL OR account_path IS NOT NULL)`, id); err != nil {
+			return fmt.Errorf("mark message %d account attribution pending: %w", id, err)
+		}
 		return nil
 	}
-	result := emailattribution.Result{Basis: "not-applicable"}
-	var mentions []string
-	switch typ {
-	case MessageTypeEmail:
-		var evidence emailattribution.Evidence
-		var encoded string
-		if raw == nil {
-			err = tx.QueryRowContext(ctx, `SELECT evidence FROM message_account_evidence WHERE message_id=?`, id).Scan(&encoded)
-			if errors.Is(err, sql.ErrNoRows) {
-				var compressed []byte
-				var compression sql.NullString
-				rawErr := tx.QueryRowContext(ctx, `SELECT raw_data,compression FROM message_raw WHERE message_id=? AND raw_format='mime'`, id).Scan(&compressed, &compression)
-				if rawErr == nil {
-					raw, err = decodeMessageRaw(compressed, compression)
-					if err != nil {
-						return err
-					}
-				} else if !errors.Is(rawErr, sql.ErrNoRows) {
-					return rawErr
-				}
-			} else if err != nil {
-				return err
-			}
-		}
-		if raw != nil {
-			evidence = emailattribution.Parse(raw)
-		} else if encoded != "" {
-			if err = json.Unmarshal([]byte(encoded), &evidence); err != nil {
-				return fmt.Errorf("decode account header evidence: %w", err)
-			}
-		} else {
-			// Archives lacking raw MIME can still use immutable envelope snapshots.
-			rows, e := tx.QueryContext(ctx, `SELECT email_address,recipient_type FROM message_recipients WHERE message_id=? AND email_address IS NOT NULL`, id)
-			if e != nil {
-				return e
-			}
-			for rows.Next() {
-				var address, kind string
-				if e = rows.Scan(&address, &kind); e != nil {
-					_ = rows.Close()
-					return e
-				}
-				address = NormalizeIdentifierForCompare(address)
-				switch kind {
-				case meetingSenderRole:
-					evidence.From = append(evidence.From, address)
-				case "to", "cc":
-					evidence.Visible = append(evidence.Visible, address)
-				case "bcc":
-					evidence.Diagnostic = append(evidence.Diagnostic, address)
-				}
-			}
-			e = rows.Err()
-			_ = rows.Close()
-			if e != nil {
-				return e
-			}
-		}
-		mentions = evidence.Mentions()
-		encodedBytes, e := json.Marshal(evidence, json.Deterministic(true))
-		if e != nil {
-			return e
-		}
-		// Conditional upsert makes replay a true no-op for evidence and mentions.
-		newEncoded := string(encodedBytes)
-		var current string
-		readErr := tx.QueryRowContext(ctx, `SELECT evidence FROM message_account_evidence WHERE message_id=?`, id).Scan(&current)
-		if readErr != nil && !errors.Is(readErr, sql.ErrNoRows) {
-			return readErr
-		}
-		if current != newEncoded || errors.Is(readErr, sql.ErrNoRows) {
-			if _, e = tx.ExecContext(ctx, `INSERT INTO message_account_evidence(message_id,evidence) VALUES (?,?) ON CONFLICT(message_id) DO UPDATE SET evidence=excluded.evidence`, id, newEncoded); e != nil {
-				return e
-			}
-		}
-		inbox, e := accountInboxAddress(sourceType, identifier, config)
-		if e != nil {
-			return e
-		}
-		candidates, e := s.accountCandidatesWith(ctx, tx, sourceID, append(mentions, inbox))
-		if e != nil {
-			return e
-		}
-		result = emailattribution.Attribute(evidence, candidates, inbox, sent)
-		if !sent && (result.Basis == "source-default" || result.Basis == "missing-evidence" || result.Basis == "malformed-evidence") && inbox != "" {
-			mentions = append(mentions, inbox)
-		}
-	case "calendar_event":
-		var sc struct {
-			CalendarID     string `json:"calendar_id"`
-			AccountEmail   string `json:"account_email"`
-			AccountAddress string `json:"account_address"`
-		}
-		if config.Valid && config.String != "" {
-			if e := json.Unmarshal([]byte(config.String), &sc); e != nil {
-				return fmt.Errorf("decode calendar account mapping: %w", e)
-			}
-		}
-		if sc.CalendarID == "" && metadata.Valid {
-			if e := json.Unmarshal([]byte(metadata.String), &sc); e != nil {
-				return e
-			}
-		}
-		address := sc.AccountAddress
-		if address == "" {
-			address = sc.CalendarID
-			if address == "primary" {
-				address = sc.AccountEmail
-			}
-		}
-		result.Path = "calendar"
-		result.Basis = "unmapped-calendar"
-		parsed, parseErr := mail.ParseAddress(address)
-		if parseErr == nil && parsed.Address == address && strings.Contains(address, "@") && (sc.AccountAddress != "" || !strings.HasSuffix(strings.ToLower(address), "@group.calendar.google.com")) {
-			mentions = []string{NormalizeIdentifierForCompare(address)}
-			candidates, e := s.accountCandidatesWith(ctx, tx, sourceID, []string{NormalizeIdentifierForCompare(address)})
-			if e != nil {
-				return e
-			}
-			result.Basis = "unconfirmed-calendar"
-			if len(candidates) == 1 {
-				result.Address = candidates[0]
-				result.Basis = "calendar"
-			}
-		}
-	}
-	if err := s.replaceAccountMentionsWith(ctx, tx, sourceID, id, mentions); err != nil {
-		return err
-	}
-
-	if oldAddress.String == result.Address && oldPath.String == result.Path && oldBasis == result.Basis {
-		return nil
-	}
-	var address, path any
-	if result.Address != "" {
-		address = result.Address
-	}
-	if result.Path != "" {
-		path = result.Path
-	}
-	if _, err = tx.ExecContext(ctx, `UPDATE messages SET account_address=?, account_path=?, account_attribution_basis=? WHERE id=?`, address, path, result.Basis, id); err != nil {
-		return err
-	}
-	if !s.IsPostgreSQL() {
-		if _, err = tx.ExecContext(ctx, `INSERT INTO cache_related_change_journal(dataset,message_id) VALUES ('message_facts',?)`, id); err != nil {
-			return err
-		}
-	}
-	// The message-scoped journal lets append-only syncs carry facts above the
-	// published boundary. Changes to exported messages still force a refresh.
-	return s.bumpDerivedDataRevision(tx, true)
+	_, err = s.refreshAccountAttributionTx(ctx, tx, id, delivery)
+	return err
 }
 
-// accountInboxAddress resolves a mailbox sink without treating connection URLs
-// or display names as addresses. Candidate lookup still requires confirmation.
-func accountInboxAddress(sourceType, identifier string, config sql.NullString) (string, error) {
-	address := identifier
-	if sourceType == "imap" {
-		var cfg struct {
-			Username string `json:"username"`
+// shareIdentityLockTxContext holds the identity revision row FOR SHARE on
+// PostgreSQL, so identity writers wait for attribution readers while readers
+// of different sources run together. SQLite has one writer, so the source lock
+// that follows already serializes everything.
+func (s *Store) shareIdentityLockTxContext(ctx context.Context, tx *loggedTx) error {
+	if !s.IsPostgreSQL() {
+		return nil
+	}
+	share := func() error {
+		var value string
+		return tx.QueryRowContext(ctx,
+			`SELECT value FROM archive_metadata WHERE key = ? FOR SHARE`, identityRevisionKey,
+		).Scan(&value)
+	}
+	err := share()
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, err := tx.ExecContext(ctx, s.dialect.InsertOrIgnore(
+			`INSERT OR IGNORE INTO archive_metadata (key, value) VALUES (?, '0')`),
+			identityRevisionKey); err != nil {
+			return fmt.Errorf("seed identity revision: %w", err)
 		}
-		if config.Valid && config.String != "" {
-			if err := json.Unmarshal([]byte(config.String), &cfg); err != nil {
-				return "", fmt.Errorf("decode IMAP account username: %w", err)
-			}
-		}
-		if cfg.Username != "" {
-			address = cfg.Username
-		} else if u, err := url.Parse(identifier); err == nil && u.Host != "" && u.User != nil {
+		err = share()
+	}
+	if err != nil {
+		return fmt.Errorf("share identity revision: %w", err)
+	}
+	return nil
+}
+
+// messageSourceIDContext reads a message's source before a transaction opens.
+// messages.source_id never changes after insert. A missing message yields 0.
+func (s *Store) messageSourceIDContext(ctx context.Context, messageID int64) (int64, error) {
+	var sourceID int64
+	err := s.db.QueryRowContext(ctx, `SELECT source_id FROM messages WHERE id = ?`, messageID).Scan(&sourceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read message %d source: %w", messageID, err)
+	}
+	return sourceID, nil
+}
+
+// withMessageAttributionTxContext opens a shared attribution transaction that
+// locks messageID's source.
+func (s *Store) withMessageAttributionTxContext(
+	ctx context.Context, messageID int64, fn func(*loggedTx) error,
+) error {
+	sourceID, err := s.messageSourceIDContext(ctx, messageID)
+	if err != nil {
+		return err
+	}
+	lock := attributionLock{}
+	if sourceID != 0 {
+		lock.Sources = []int64{sourceID}
+	}
+	return s.withAttributionTxContext(ctx, lock, fn)
+}
+
+func sentFolderLabelSQL(l string) string {
+	return l + ".system_role = 'sent'"
+}
+
+func sentGmailLabelSQL(l, src string) string {
+	return "(" + src + ".source_type = 'gmail' AND " + l + ".source_label_id = 'SENT')"
+}
+
+// sentEvidenceLabelSQL is true for a label that provider metadata marks as
+// sent mail: a Sent folder role, or Gmail's SENT system label.
+func sentEvidenceLabelSQL(l, src string) string {
+	return "(" + sentFolderLabelSQL(l) + " OR " + sentGmailLabelSQL(l, src) + ")"
+}
+
+// sentEvidenceExistsSQL is true when message m carries a Sent label of its
+// own source. src must be m's source row.
+func sentEvidenceExistsSQL(m, src string) string {
+	return `EXISTS (SELECT 1 FROM message_labels ml JOIN labels l ON l.id = ml.label_id
+		WHERE ml.message_id = ` + m + `.id AND l.source_id = ` + m + `.source_id
+		  AND ` + sentEvidenceLabelSQL("l", src) + `)`
+}
+
+// accountSink returns the mailbox a source delivers into, normalized, or ""
+// when the source identifier is not a mailbox.
+func accountSink(sourceType, identifier string) string {
+	address := strings.TrimSpace(identifier)
+	switch sourceType {
+	case "imap", "imaps", "imap+starttls":
+		if u, err := url.Parse(address); err == nil && u.User != nil {
 			switch strings.ToLower(u.Scheme) {
 			case "imap", "imaps", "imap+starttls":
 				address = u.User.Username()
 			}
 		}
 	}
-	address = strings.TrimSpace(address)
-	if parsed, err := mail.ParseAddress(address); err == nil && parsed.Address == address && strings.Contains(address, "@") {
-		return NormalizeIdentifierForCompare(address), nil
+	if !isExactMailbox(address) {
+		return ""
 	}
-	return "", nil
+	return NormalizeIdentifierForCompare(address)
 }
 
-func (s *Store) replaceAccountMentionsWith(ctx context.Context, tx *loggedTx, sourceID, id int64, mentions []string) error {
-	mentions = append([]string(nil), mentions...)
-	slices.Sort(mentions)
-	mentions = slices.Compact(mentions)
-	rows, err := tx.QueryContext(ctx, `SELECT address_key,source_id FROM message_account_mentions WHERE message_id=? ORDER BY address_key`, id)
+func isExactMailbox(address string) bool {
+	parsed, err := mail.ParseAddress(address)
+	return err == nil && parsed.Address == address && strings.Contains(address, "@")
+}
+
+// deliveryInput tells the owner where delivery evidence comes from. The zero
+// value reuses stored rows, or reads stored MIME when the row is pending.
+type deliveryInput struct {
+	parsed     *emailattribution.Headers
+	malformed  bool
+	reloadMIME bool
+}
+
+// deliveryFromMIME parses delivery evidence from a full MIME payload.
+func deliveryFromMIME(raw []byte) deliveryInput {
+	block := headerBlock(raw)
+	if block == nil {
+		return deliveryInput{parsed: &emailattribution.Headers{}, malformed: true}
+	}
+	headers, malformed, err := parseDeliveryBlock(block)
 	if err != nil {
-		return err
+		return deliveryInput{parsed: &emailattribution.Headers{}, malformed: true}
 	}
-	var current []string
-	sourceMatches := true
-	for rows.Next() {
-		var a string
-		var existingSource int64
-		if err = rows.Scan(&a, &existingSource); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		sourceMatches = sourceMatches && existingSource == sourceID
-		current = append(current, a)
+	return deliveryInput{parsed: &headers, malformed: malformed}
+}
+
+// headerBlock returns the outer header block, or nil when it is larger than
+// emailattribution.MaxHeaderBytes. It looks only at the bytes the bounded
+// repair reader sees, so ingest and repair find the same block.
+func headerBlock(raw []byte) []byte {
+	prefix := raw[:min(len(raw), emailattribution.MaxHeaderBytes+1)]
+	if end := mimeHeaderEnd(prefix); end > 0 {
+		return prefix[:end]
 	}
-	err = rows.Err()
-	_ = rows.Close()
-	if err != nil {
-		return err
-	}
-	if sourceMatches && slices.Equal(current, mentions) {
+	if len(prefix) > emailattribution.MaxHeaderBytes {
 		return nil
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM message_account_mentions WHERE message_id=?`, id); err != nil {
+	return prefix
+}
+
+func parseDeliveryBlock(block []byte) (emailattribution.Headers, bool, error) {
+	if mimeHeaderEnd(block) == 0 {
+		// A header-only payload has no blank line; terminate it for the reader.
+		block = append(slices.Clip(block), "\r\n\r\n"...)
+	}
+	return emailattribution.ParseHeaders(block)
+}
+
+// refreshAccountAttributionTx is the one owner of messages.account_address
+// and messages.account_path. It derives the pair for one row from stored
+// inputs and writes it only when it changed. malformed reports delivery
+// evidence that could not be decoded. It never bumps the derived-data
+// revision; the cache journal trigger records the change.
+func (s *Store) refreshAccountAttributionTx(
+	ctx context.Context, tx *loggedTx, id int64, delivery deliveryInput,
+) (bool, error) {
+	var (
+		sourceID               int64
+		messageType            string
+		oldAddress, oldPath    sql.NullString
+		sourceType, identifier string
+		syncConfig             sql.NullString
+	)
+	err := tx.QueryRowContext(ctx, `
+		SELECT m.source_id, COALESCE(m.message_type, ''), m.account_address, m.account_path,
+		       src.source_type, COALESCE(src.identifier, ''), src.sync_config
+		FROM messages m JOIN sources src ON src.id = m.source_id
+		WHERE m.id = ?`, id,
+	).Scan(&sourceID, &messageType, &oldAddress, &oldPath, &sourceType, &identifier, &syncConfig)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read account attribution inputs for message %d: %w", id, err)
+	}
+	if !IsEmailMessageType(messageType) && messageType != "calendar_event" {
+		if !oldAddress.Valid && !oldPath.Valid {
+			return false, nil
+		}
+		return false, s.writeAccountAttributionTx(ctx, tx, id, messageType, "", "")
+	}
+	if !tx.attribution.holds(sourceID) {
+		return false, fmt.Errorf("message %d of source %d: %w", id, sourceID, errAttributionLockMissing)
+	}
+	if s.accountAttributionAfterReadHook != nil {
+		s.accountAttributionAfterReadHook(id)
+	}
+	write := func(address, path string) error {
+		if oldPath.Valid && oldPath.String == path && oldAddress.String == address && oldAddress.Valid == (address != "") {
+			return nil
+		}
+		return s.writeAccountAttributionTx(ctx, tx, id, messageType, address, path)
+	}
+
+	if messageType == "calendar_event" {
+		address, err := s.calendarAccountAddressTx(ctx, tx, sourceID, syncConfig)
+		if err != nil {
+			return false, err
+		}
+		return false, write(address, accountPathCalendar)
+	}
+
+	var headers emailattribution.Headers
+	malformed := false
+	switch {
+	case delivery.parsed != nil:
+		headers, malformed = *delivery.parsed, delivery.malformed
+		if err := replaceDeliveryAddressesTx(ctx, tx, id, headers); err != nil {
+			return false, err
+		}
+	case delivery.reloadMIME || !oldPath.Valid:
+		headers, malformed, err = s.readDeliveryHeadersTx(ctx, tx, id)
+		if err != nil {
+			return false, err
+		}
+		if err := replaceDeliveryAddressesTx(ctx, tx, id, headers); err != nil {
+			return false, err
+		}
+	default:
+		headers, err = loadDeliveryAddressesTx(ctx, tx, id)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	matches, err := matchMessageIdentitiesWith(ctx, tx, []int64{id})
+	if err != nil {
+		return malformed, err
+	}
+	match := matches[id]
+
+	var sent bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT `+sentEvidenceExistsSQL("m", "src")+`
+		FROM messages m JOIN sources src ON src.id = m.source_id
+		WHERE m.id = ?`, id,
+	).Scan(&sent); err != nil {
+		return malformed, fmt.Errorf("read sent evidence for message %d: %w", id, err)
+	}
+
+	candidates, err := sourceIdentityKeysTx(ctx, tx, sourceID)
+	if err != nil {
+		return malformed, err
+	}
+	result := emailattribution.Attribute(emailattribution.Evidence{
+		Original:  headers.Original,
+		Delivered: headers.Delivered,
+		Visible:   match.Visible,
+		Sender:    match.Sender,
+	}, candidates, accountSink(sourceType, identifier), sent)
+	path := accountPathInbound
+	if sent {
+		path = accountPathSent
+	}
+	return malformed, write(result.Address, path)
+}
+
+// writeAccountAttributionTx writes the pair. The message_type guard keeps a
+// concurrent retype, which clears the pair on its own transaction, from being
+// overwritten by a derivation that read the old type.
+func (s *Store) writeAccountAttributionTx(
+	ctx context.Context, tx *loggedTx, id int64, messageType, address, path string,
+) error {
+	var addressValue, pathValue any
+	if address != "" {
+		addressValue = address
+	}
+	if path != "" {
+		pathValue = path
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE messages SET account_address = ?, account_path = ?
+		WHERE id = ? AND COALESCE(message_type, '') = ?`,
+		addressValue, pathValue, id, messageType,
+	); err != nil {
+		return fmt.Errorf("write account attribution for message %d: %w", id, err)
+	}
+	return nil
+}
+
+func sourceIdentityKeysTx(ctx context.Context, tx *loggedTx, sourceID int64) ([]string, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT address_key FROM account_identities WHERE source_id = ? AND address_key <> ''`, sourceID)
+	if err != nil {
+		return nil, fmt.Errorf("read account identities of source %d: %w", sourceID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var keys []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("scan account identity: %w", err)
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+type calendarSourceConfig struct {
+	AccountEmail string `json:"account_email"`
+	CalendarID   string `json:"calendar_id"`
+	Primary      bool   `json:"primary"`
+}
+
+// calendarMailbox maps a calendar source to the mailbox it belongs to: the
+// account email for the primary calendar, or a calendar ID that is itself a
+// mailbox. Google group and resource calendars map to "".
+func calendarMailbox(syncConfig sql.NullString) string {
+	if !syncConfig.Valid || strings.TrimSpace(syncConfig.String) == "" {
+		return ""
+	}
+	var cfg calendarSourceConfig
+	if err := json.Unmarshal([]byte(syncConfig.String), &cfg); err != nil {
+		return ""
+	}
+	address := cfg.CalendarID
+	if cfg.Primary || cfg.CalendarID == "primary" {
+		address = cfg.AccountEmail
+	}
+	address = strings.TrimSpace(address)
+	if !isExactMailbox(address) {
+		return ""
+	}
+	domain := strings.ToLower(address[strings.LastIndex(address, "@")+1:])
+	if strings.HasSuffix(domain, ".calendar.google.com") {
+		return ""
+	}
+	return NormalizeIdentifierForCompare(address)
+}
+
+func (s *Store) calendarAccountAddressTx(
+	ctx context.Context, tx *loggedTx, sourceID int64, syncConfig sql.NullString,
+) (string, error) {
+	address := calendarMailbox(syncConfig)
+	if address == "" {
+		return "", nil
+	}
+	var confirmed int
+	err := tx.QueryRowContext(ctx,
+		`SELECT 1 FROM account_identities WHERE source_id = ? AND address_key = ?`,
+		sourceID, address).Scan(&confirmed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("check calendar account of source %d: %w", sourceID, err)
+	}
+	return address, nil
+}
+
+// readDeliveryHeadersTx reads a bounded prefix of the stored MIME and parses
+// its delivery headers. Undecodable payloads report malformed with no
+// evidence; SQL errors return.
+func (s *Store) readDeliveryHeadersTx(
+	ctx context.Context, tx *loggedTx, id int64,
+) (emailattribution.Headers, bool, error) {
+	var prefix []byte
+	var compression sql.NullString
+	err := tx.QueryRowContext(ctx, `
+		SELECT `+s.dialect.BlobPrefixSQL("raw_data")+`, compression
+		FROM message_raw WHERE message_id = ? AND raw_format = 'mime'`,
+		accountHeaderRawPrefix, id,
+	).Scan(&prefix, &compression)
+	if errors.Is(err, sql.ErrNoRows) {
+		return emailattribution.Headers{}, false, nil
+	}
+	if err != nil {
+		return emailattribution.Headers{}, false, fmt.Errorf("read raw MIME headers for message %d: %w", id, err)
+	}
+	headers, malformed := decodeDeliveryHeaders(prefix, compression)
+	return headers, malformed, nil
+}
+
+// decodeDeliveryHeaders reads delivery evidence from a stored blob prefix.
+// A payload that cannot be decoded yields no evidence and reports malformed.
+func decodeDeliveryHeaders(prefix []byte, compression sql.NullString) (emailattribution.Headers, bool) {
+	block, decodeErr := decodeMessageRawHeaderBounded(prefix, compression, emailattribution.MaxHeaderBytes)
+	if decodeErr != nil {
+		return emailattribution.Headers{}, true
+	}
+	headers, malformed, parseErr := parseDeliveryBlock(block)
+	if parseErr != nil {
+		return emailattribution.Headers{}, true
+	}
+	return headers, malformed
+}
+
+type deliveryAddress struct{ kind, address string }
+
+func deliveryAddressSet(headers emailattribution.Headers) []deliveryAddress {
+	var out []deliveryAddress
+	for _, a := range headers.Original {
+		out = append(out, deliveryAddress{deliveryKindOriginal, a})
+	}
+	for _, a := range headers.Delivered {
+		out = append(out, deliveryAddress{deliveryKindDelivered, a})
+	}
+	slices.SortFunc(out, func(a, b deliveryAddress) int {
+		if c := strings.Compare(a.kind, b.kind); c != 0 {
+			return c
+		}
+		return strings.Compare(a.address, b.address)
+	})
+	return slices.Compact(out)
+}
+
+func loadDeliveryAddressRowsTx(ctx context.Context, tx *loggedTx, id int64) ([]deliveryAddress, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT kind, address FROM message_delivery_addresses WHERE message_id = ? ORDER BY kind, address`, id)
+	if err != nil {
+		return nil, fmt.Errorf("read delivery addresses for message %d: %w", id, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []deliveryAddress
+	for rows.Next() {
+		var row deliveryAddress
+		if err := rows.Scan(&row.kind, &row.address); err != nil {
+			return nil, fmt.Errorf("scan delivery address: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func loadDeliveryAddressesTx(ctx context.Context, tx *loggedTx, id int64) (emailattribution.Headers, error) {
+	rows, err := loadDeliveryAddressRowsTx(ctx, tx, id)
+	if err != nil {
+		return emailattribution.Headers{}, err
+	}
+	var headers emailattribution.Headers
+	for _, row := range rows {
+		if row.kind == deliveryKindOriginal {
+			headers.Original = append(headers.Original, row.address)
+		} else {
+			headers.Delivered = append(headers.Delivered, row.address)
+		}
+	}
+	return headers, nil
+}
+
+func replaceDeliveryAddressesTx(
+	ctx context.Context, tx *loggedTx, id int64, headers emailattribution.Headers,
+) error {
+	want := deliveryAddressSet(headers)
+	have, err := loadDeliveryAddressRowsTx(ctx, tx, id)
+	if err != nil {
 		return err
 	}
-	for _, a := range mentions {
-		if _, err = tx.ExecContext(ctx, `INSERT INTO message_account_mentions(source_id,message_id,address_key) VALUES (?,?,?)`, sourceID, id, a); err != nil {
+	if slices.Equal(want, have) {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM message_delivery_addresses WHERE message_id = ?`, id); err != nil {
+		return fmt.Errorf("clear delivery addresses for message %d: %w", id, err)
+	}
+	for _, row := range want {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO message_delivery_addresses (message_id, kind, address) VALUES (?, ?, ?)`,
+			id, row.kind, row.address); err != nil {
+			return fmt.Errorf("store delivery address for message %d: %w", id, err)
+		}
+	}
+	return nil
+}
+
+// refreshAccountAttributionForMessagesTx refreshes each row once from stored
+// inputs.
+func (s *Store) refreshAccountAttributionForMessagesTx(ctx context.Context, tx *loggedTx, ids []int64) error {
+	ids = slices.Clone(ids)
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := s.refreshAccountAttributionTx(ctx, tx, id, deliveryInput{}); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Store) accountCandidatesWith(ctx context.Context, tx *loggedTx, sourceID int64, mentions []string) ([]string, error) {
-	var result []string
-	err := queryInChunksContext(ctx, tx, mentions, []any{sourceID}, `SELECT address_key FROM account_identities WHERE source_id=? AND address_key<>'' AND address_key IN (%s)`, func(rows *loggedRows) error {
-		var address string
-		if err := rows.Scan(&address); err != nil {
-			return err
-		}
-		result = append(result, address)
-		return nil
-	})
-	return result, err
-}
-
-func (s *Store) RefreshAccountAttributionContext(ctx context.Context, id int64) error {
-	return s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
-		}
-		err := s.refreshAccountAttributionWith(ctx, tx, id, nil)
-		return err
-	})
-}
-
-// RecomputeAccountAttributionForIdentitiesContext visits only indexed mention
-// hits. New identities cannot cause a scan of every message in their source.
-func (s *Store) RecomputeAccountAttributionForIdentitiesContext(ctx context.Context, sourceID int64, addresses []string) (int64, error) {
-	var scanned int64
-	err := s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
-		}
-		return s.recomputeAccountIdentitiesWith(ctx, tx, sourceID, addresses, &scanned)
-	})
-	return scanned, err
-}
-
-func (s *Store) recomputeAccountIdentitiesWith(ctx context.Context, tx *loggedTx, sourceID int64, addresses []string, scanned *int64) error {
-	unique := make(map[int64]bool)
-	normalized := make([]string, 0, len(addresses))
-	for _, a := range addresses {
-		normalized = append(normalized, NormalizeIdentifierForCompare(a))
+// refreshCalendarAccountAttributionTx re-derives every calendar event of a
+// source after its mapped mailbox changes.
+func (s *Store) refreshCalendarAccountAttributionTx(ctx context.Context, tx *loggedTx, sourceID int64) error {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM messages WHERE source_id = ? AND message_type = 'calendar_event'`, sourceID)
+	if err != nil {
+		return fmt.Errorf("list calendar events of source %d: %w", sourceID, err)
 	}
-	err := queryInChunksContext(ctx, tx, normalized, []any{sourceID}, `SELECT message_id FROM message_account_mentions WHERE source_id=? AND address_key IN (%s)`, func(rows *loggedRows) error {
+	var ids []int64
+	for rows.Next() {
 		var id int64
-		if e := rows.Scan(&id); e != nil {
-			return e
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan calendar event of source %d: %w", sourceID, err)
 		}
-		unique[id] = true
-		return nil
-	})
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("list calendar events of source %d: %w", sourceID, err)
+	}
+	return s.refreshAccountAttributionForMessagesTx(ctx, tx, ids)
+}
+
+func messageHasSentEvidenceTx(ctx context.Context, tx *loggedTx, messageID int64) (bool, error) {
+	var sent bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT `+sentEvidenceExistsSQL("m", "src")+`
+		FROM messages m JOIN sources src ON src.id = m.source_id
+		WHERE m.id = ?`, messageID).Scan(&sent)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read sent evidence for message %d: %w", messageID, err)
+	}
+	return sent, nil
+}
+
+// refreshAccountAttributionIfSentChangedTx runs a label membership mutation
+// and refreshes the message only when its Sent evidence changed.
+func (s *Store) refreshAccountAttributionIfSentChangedTx(
+	ctx context.Context, tx *loggedTx, messageID int64, mutate func() error,
+) error {
+	before, err := messageHasSentEvidenceTx(ctx, tx, messageID)
 	if err != nil {
 		return err
 	}
-	ids := make([]int64, 0, len(unique))
-	for id := range unique {
+	if err := mutate(); err != nil {
+		return err
+	}
+	after, err := messageHasSentEvidenceTx(ctx, tx, messageID)
+	if err != nil {
+		return err
+	}
+	if before == after {
+		return nil
+	}
+	_, err = s.refreshAccountAttributionTx(ctx, tx, messageID, deliveryInput{})
+	return err
+}
+
+// labelSentFlips collects messages of one source whose labels changed Sent
+// evidence because a label definition changed. Callers capture the labels a
+// write can touch, mutate them, then apply the flips before commit.
+type labelSentFlips struct {
+	ctx      context.Context
+	tx       *loggedTx
+	sourceID int64
+	before   map[int64]bool
+}
+
+func newLabelSentFlips(ctx context.Context, tx *loggedTx, sourceID int64) *labelSentFlips {
+	return &labelSentFlips{ctx: ctx, tx: tx, sourceID: sourceID}
+}
+
+func sentEvidenceByLabelQuery(where string) string {
+	return `SELECT l.id, COALESCE(` + sentEvidenceLabelSQL("l", "src") + `, FALSE)
+		FROM labels l JOIN sources src ON src.id = l.source_id
+		WHERE l.source_id = ? AND ` + where
+}
+
+// captureLabels records the Sent evidence of every existing label a write to
+// these provider IDs or names can update, rename onto or merge. Labels created
+// by the write have no members and need no capture.
+func (f *labelSentFlips) captureLabels(sourceLabelIDs, names []string) error {
+	if f == nil || (len(sourceLabelIDs) == 0 && len(names) == 0) {
+		return nil
+	}
+	if f.before == nil {
+		f.before = make(map[int64]bool)
+	}
+	keys := append(slices.Clone(sourceLabelIDs), names...)
+	for start := 0; start < len(keys); start += 400 {
+		chunk := keys[start:min(start+400, len(keys))]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		args := make([]any, 0, 1+2*len(chunk))
+		args = append(args, f.sourceID)
+		for range 2 {
+			for _, k := range chunk {
+				args = append(args, k)
+			}
+		}
+		rows, err := f.tx.QueryContext(f.ctx, sentEvidenceByLabelQuery(
+			"(l.source_label_id IN ("+placeholders+") OR l.name IN ("+placeholders+"))"), args...)
+		if err != nil {
+			return fmt.Errorf("read label sent evidence: %w", err)
+		}
+		for rows.Next() {
+			var id int64
+			var sent bool
+			if err := rows.Scan(&id, &sent); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan label sent evidence: %w", err)
+			}
+			if _, seen := f.before[id]; !seen {
+				f.before[id] = sent
+			}
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
+			return fmt.Errorf("read label sent evidence: %w", err)
+		}
+	}
+	return nil
+}
+
+// applyLabelSentFlipsTx refreshes members of every captured label whose Sent
+// evidence changed. A label merged away moves its members onto a surviving
+// captured label, so a vanished label with different evidence refreshes the
+// members of every survivor whose evidence differs from it.
+func (s *Store) applyLabelSentFlipsTx(f *labelSentFlips) error {
+	if f == nil || len(f.before) == 0 {
+		return nil
+	}
+	ctx, tx := f.ctx, f.tx
+	ids := make([]int64, 0, len(f.before))
+	for id := range f.before {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
+	after := make(map[int64]bool, len(ids))
+	err := queryInChunksContext(ctx, tx, ids, []any{f.sourceID},
+		sentEvidenceByLabelQuery("l.id IN (%s)"), func(rows *loggedRows) error {
+			var id int64
+			var sent bool
+			if err := rows.Scan(&id, &sent); err != nil {
+				return fmt.Errorf("scan label sent evidence: %w", err)
+			}
+			after[id] = sent
+			return nil
+		})
+	if err != nil {
+		return fmt.Errorf("read label sent evidence: %w", err)
+	}
+	refresh := make(map[int64]struct{})
 	for _, id := range ids {
-		if err = s.refreshAccountAttributionWith(ctx, tx, id, nil); err != nil {
-			return err
+		now, exists := after[id]
+		if !exists {
+			for survivor, survivorSent := range after {
+				if survivorSent != f.before[id] {
+					refresh[survivor] = struct{}{}
+				}
+			}
+			continue
 		}
-		if scanned != nil {
-			*scanned++
+		if now != f.before[id] {
+			refresh[id] = struct{}{}
 		}
 	}
-	return nil
+	f.before = nil
+	if len(refresh) == 0 {
+		return nil
+	}
+	labelIDs := make([]int64, 0, len(refresh))
+	for id := range refresh {
+		labelIDs = append(labelIDs, id)
+	}
+	slices.Sort(labelIDs)
+	var messageIDs []int64
+	err = queryInChunksContext(ctx, tx, labelIDs, []any{f.sourceID}, `
+		SELECT m.id FROM messages m
+		WHERE m.source_id = ?
+		  AND EXISTS (SELECT 1 FROM message_labels ml WHERE ml.message_id = m.id AND ml.label_id IN (%s))`,
+		func(rows *loggedRows) error {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				return fmt.Errorf("scan label member: %w", err)
+			}
+			messageIDs = append(messageIDs, id)
+			return nil
+		})
+	if err != nil {
+		return fmt.Errorf("read members of changed labels: %w", err)
+	}
+	return s.refreshAccountAttributionForMessagesTx(ctx, tx, messageIDs)
 }
 
-// BackfillAccountAttributionContext persists a fixed high-water cursor with each
-// bounded page. Checkpoints happen after commit; replay is safe after a crash.
-func (s *Store) BackfillAccountAttributionContext(ctx context.Context, sourceID int64, batchSize int, checkpoint func(AccountAttributionProgress) error) (AccountAttributionProgress, error) {
-	p := AccountAttributionProgress{SourceID: sourceID}
-	if batchSize < 1 || batchSize > 500 {
-		return p, errors.New("account repair page size must be between 1 and 500")
+// recomputeAccountAttributionForAddressesTx re-derives only rows of sourceID
+// whose attribution can depend on the given addresses. It runs in exclusive
+// transactions, after an identity or the source mailbox changed.
+func (s *Store) recomputeAccountAttributionForAddressesTx(
+	ctx context.Context, tx *loggedTx, sourceID int64, addresses []string,
+) error {
+	normalized := make([]string, 0, len(addresses))
+	for _, a := range addresses {
+		if a = strings.ToLower(strings.TrimSpace(a)); a != "" {
+			normalized = append(normalized, a)
+		}
 	}
-	if err := ctx.Err(); err != nil {
-		return p, err
+	slices.Sort(normalized)
+	normalized = slices.Compact(normalized)
+	if len(normalized) == 0 {
+		return nil
 	}
+	ids := make(map[int64]struct{})
+	scan := func(rows *loggedRows) error {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("scan account attribution target: %w", err)
+		}
+		ids[id] = struct{}{}
+		return nil
+	}
+	for _, query := range []string{
+		`SELECT d.message_id FROM message_delivery_addresses d
+		 JOIN messages m ON m.id = d.message_id
+		 WHERE m.source_id = ? AND d.address IN (%s)`,
+		`SELECT m.id FROM messages m
+		 WHERE m.source_id = ? AND m.account_path IS NOT NULL
+		   AND EXISTS (
+		     SELECT 1 FROM message_recipients mr
+		     WHERE mr.message_id = m.id
+		       AND mr.recipient_type IN ('from', 'to', 'cc')
+		       AND mr.email_address IS NOT NULL
+		       AND LOWER(mr.email_address) IN (%s))`,
+		`SELECT m.id FROM messages m WHERE m.source_id = ? AND m.account_address IN (%s)`,
+	} {
+		if err := queryInChunksContext(ctx, tx, normalized, []any{sourceID}, query, scan); err != nil {
+			return fmt.Errorf("find messages mentioning changed identities: %w", err)
+		}
+	}
+
+	confirmations := make([]normalizedIdentityConfirmation, 0, len(normalized))
+	for _, a := range normalized {
+		confirmations = append(confirmations, normalizedIdentityConfirmation{identifier: a, normalized: a})
+	}
+	participantIDs, err := participantIDsForConfirmationsContext(ctx, tx, sourceID, confirmations)
+	if err != nil {
+		return err
+	}
+	fallback, err := participantFallbackMessageIDsTx(ctx, tx, &sourceID, participantIDs)
+	if err != nil {
+		return err
+	}
+	for _, id := range fallback {
+		ids[id] = struct{}{}
+	}
+
+	var sourceType, identifier string
+	var syncConfig sql.NullString
+	if err := tx.QueryRowContext(ctx,
+		`SELECT source_type, COALESCE(identifier, ''), sync_config FROM sources WHERE id = ?`, sourceID,
+	).Scan(&sourceType, &identifier, &syncConfig); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read source %d: %w", sourceID, err)
+	}
+	if sink := accountSink(sourceType, identifier); sink != "" && slices.Contains(normalized, sink) {
+		if err := scanIDsTx(ctx, tx, scan, `
+			SELECT id FROM messages
+			WHERE source_id = ? AND account_path = 'inbound' AND account_address IS NULL`, sourceID); err != nil {
+			return err
+		}
+	}
+	if mailbox := calendarMailbox(syncConfig); mailbox != "" && slices.Contains(normalized, mailbox) {
+		if err := scanIDsTx(ctx, tx, scan,
+			`SELECT id FROM messages WHERE source_id = ? AND message_type = 'calendar_event'`, sourceID); err != nil {
+			return err
+		}
+	}
+
+	list := make([]int64, 0, len(ids))
+	for id := range ids {
+		list = append(list, id)
+	}
+	return s.refreshAccountAttributionForMessagesTx(ctx, tx, list)
+}
+
+func scanIDsTx(ctx context.Context, tx *loggedTx, scan func(*loggedRows) error, query string, args ...any) error {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("find account attribution targets: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		if err := scan(rows); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// participantFallbackMessageIDsTx finds email rows whose identity matches
+// still read participants: a sender_id with no non-empty From envelope, or a
+// To/Cc row with no envelope address. Envelope rows never depend on
+// participants. A nil sourceID searches every source.
+func participantFallbackMessageIDsTx(
+	ctx context.Context, tx *loggedTx, sourceID *int64, participantIDs []int64,
+) ([]int64, error) {
+	if len(participantIDs) == 0 {
+		return nil, nil
+	}
+	sourceFilter, prefix := "", []any(nil)
+	if sourceID != nil {
+		sourceFilter, prefix = "m.source_id = ? AND ", []any{*sourceID}
+	}
+	var out []int64
+	scan := func(rows *loggedRows) error {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("scan participant fallback message: %w", err)
+		}
+		out = append(out, id)
+		return nil
+	}
+	for _, query := range []string{
+		`SELECT m.id FROM messages m
+		 WHERE ` + sourceFilter + `COALESCE(m.message_type, '') IN ('', 'email')
+		   AND m.sender_id IN (%s)
+		   AND NOT EXISTS (
+		     SELECT 1 FROM message_recipients mr
+		     WHERE mr.message_id = m.id AND mr.recipient_type = 'from'
+		       AND mr.email_address IS NOT NULL AND TRIM(mr.email_address) <> '')`,
+		`SELECT m.id FROM messages m
+		 WHERE ` + sourceFilter + `COALESCE(m.message_type, '') IN ('', 'email')
+		   AND EXISTS (
+		     SELECT 1 FROM message_recipients mr
+		     WHERE mr.message_id = m.id AND mr.recipient_type IN ('from', 'to', 'cc')
+		       AND mr.participant_id IN (%s)
+		       AND (mr.email_address IS NULL OR TRIM(mr.email_address) = ''))`,
+	} {
+		if err := queryInChunksContext(ctx, tx, participantIDs, prefix, query, scan); err != nil {
+			return nil, fmt.Errorf("find participant fallback messages: %w", err)
+		}
+	}
+	return out, nil
+}
+
+// refreshAccountAttributionForParticipantsTx re-derives rows whose identity
+// matches read these participants. It runs in exclusive transactions.
+func (s *Store) refreshAccountAttributionForParticipantsTx(
+	ctx context.Context, tx *loggedTx, participantIDs []int64,
+) error {
+	ids, err := participantFallbackMessageIDsTx(ctx, tx, nil, participantIDs)
+	if err != nil {
+		return err
+	}
+	return s.refreshAccountAttributionForMessagesTx(ctx, tx, ids)
+}
+
+// AccountAttributionRepairSummary reports one account-attribution repair run.
+// Undecodable counts rows whose stored delivery headers could not be read;
+// they are still attributed from their envelope.
+type AccountAttributionRepairSummary struct {
+	Scanned     int64
+	Undecodable int64
+}
+
+// RepairAccountAttributionContext derives every pending email and calendar
+// row of one source, a page per transaction. Committed pages stay derived, so
+// a cancelled run resumes where it stopped. SQL errors and cancellation stop
+// the run; undecodable payloads are counted and skipped.
+//
+// A future accountAttributionVersion bump that changes output must clear
+// account_path for the source first, or derived rows keep the old answer.
+func (s *Store) RepairAccountAttributionContext(
+	ctx context.Context, sourceID int64, progress func(AccountAttributionRepairSummary),
+) (AccountAttributionRepairSummary, error) {
+	var summary AccountAttributionRepairSummary
+	var present int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM sources WHERE id = ?`, sourceID).Scan(&present)
+	if errors.Is(err, sql.ErrNoRows) {
+		return summary, nil
+	}
+	if err != nil {
+		return summary, fmt.Errorf("read source %d: %w", sourceID, err)
+	}
+	var lastID int64
+	hasCursor := false
 	for {
-		committed := p
-		err := s.withTxContext(ctx, func(tx *loggedTx) error {
-			if e := s.lockIdentityMutationTxContext(ctx, tx); e != nil {
-				return e
+		if err := ctx.Err(); err != nil {
+			return summary, err
+		}
+		page := AccountAttributionRepairSummary{}
+		var pageLast int64
+		var count int
+		err := s.withAttributionTxContext(ctx, attributionLock{Sources: []int64{sourceID}}, func(tx *loggedTx) error {
+			query := `SELECT id FROM messages
+				WHERE source_id = ? AND account_path IS NULL
+				  AND COALESCE(message_type, '') IN ('', 'email', 'calendar_event')`
+			args := []any{sourceID}
+			if hasCursor {
+				query += ` AND id > ?`
+				args = append(args, lastID)
 			}
-			var version, completed int
-			initialPage := false
-			e := tx.QueryRowContext(ctx, `SELECT last_message_id,high_water_id,rule_version,completed FROM account_attribution_repair_progress WHERE source_id=?`+s.dialect.SelectForUpdate(), sourceID).Scan(&p.LastMessageID, &p.HighWaterID, &version, &completed)
-			if errors.Is(e, sql.ErrNoRows) || (e == nil && version != accountAttributionRuleVersion) {
-				initialPage = true
-				p.LastMessageID = 0
-				if e = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM messages WHERE source_id=?`, sourceID).Scan(&p.HighWaterID); e != nil {
-					return e
-				}
-				if _, e = tx.ExecContext(ctx, `INSERT INTO account_attribution_repair_progress(source_id,last_message_id,high_water_id,rule_version,completed) VALUES (?,0,?,?,0) ON CONFLICT(source_id) DO UPDATE SET last_message_id=0, high_water_id=excluded.high_water_id,rule_version=excluded.rule_version,completed=0`, sourceID, p.HighWaterID, accountAttributionRuleVersion); e != nil {
-					return e
-				}
-				completed = 0
-			} else if e != nil {
-				return e
+			query += ` ORDER BY id LIMIT ?`
+			pageSize := accountRepairPageSize
+			if s.accountRepairPageSizeOverride > 0 {
+				pageSize = s.accountRepairPageSizeOverride
 			}
-			if completed != 0 {
-				p.Completed = true
-				return nil
-			}
-			// The first page has no lower bound: zero and MinInt64 are legal IDs.
-			// Ledger creation commits with that page, so resume always has a cursor.
-			stmt := `SELECT id FROM messages WHERE source_id=? AND id<=? AND (message_type IN ('email','calendar_event') OR message_type IS NULL OR message_type='')`
-			args := []any{sourceID, p.HighWaterID}
-			if !initialPage {
-				stmt += ` AND id>?`
-				args = append(args, p.LastMessageID)
-			}
-			stmt += ` ORDER BY id LIMIT ?`
-			args = append(args, batchSize)
-			rows, e := tx.QueryContext(ctx, stmt, args...)
-			if e != nil {
-				return e
-			}
+			args = append(args, pageSize)
 			var ids []int64
-			for rows.Next() {
+			if err := scanIDsTx(ctx, tx, func(rows *loggedRows) error {
 				var id int64
-				if e = rows.Scan(&id); e != nil {
-					_ = rows.Close()
-					return e
+				if err := rows.Scan(&id); err != nil {
+					return err
 				}
 				ids = append(ids, id)
-			}
-			e = rows.Err()
-			_ = rows.Close()
-			if e != nil {
-				return e
+				return nil
+			}, query, args...); err != nil {
+				return err
 			}
 			for _, id := range ids {
-				if e = s.refreshAccountAttributionWith(ctx, tx, id, nil); e != nil {
-					return e
+				if err := ctx.Err(); err != nil {
+					return err
 				}
+				malformed, err := s.refreshAccountAttributionTx(ctx, tx, id, deliveryInput{})
+				if err != nil {
+					return err
+				}
+				page.Scanned++
+				if malformed {
+					page.Undecodable++
+				}
+				pageLast = id
 			}
-			p.Scanned += int64(len(ids))
-			if len(ids) > 0 {
-				p.LastMessageID = ids[len(ids)-1]
-			} else {
-				p.Completed = true
-			}
-			done := 0
-			if p.Completed {
-				done = 1
-			}
-			_, e = tx.ExecContext(ctx, `UPDATE account_attribution_repair_progress SET last_message_id=?,completed=? WHERE source_id=?`, p.LastMessageID, done, sourceID)
-			return e
+			count = len(ids)
+			return nil
 		})
 		if err != nil {
-			return committed, err
+			return summary, fmt.Errorf("repair account attribution for source %d: %w", sourceID, err)
 		}
-		if checkpoint != nil {
-			if err = checkpoint(p); err != nil {
-				return p, fmt.Errorf("checkpoint account attribution: %w", err)
-			}
+		if count == 0 {
+			return summary, nil
 		}
-		if p.Completed {
-			return p, nil
+		summary.Scanned += page.Scanned
+		summary.Undecodable += page.Undecodable
+		lastID, hasCursor = pageLast, true
+		if progress != nil {
+			progress(summary)
 		}
 	}
 }

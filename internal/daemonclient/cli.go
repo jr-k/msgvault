@@ -249,7 +249,6 @@ type CLIHybridSearchMatch struct {
 }
 
 type SimilarSearchRequest struct {
-	AccountScopes []search.AccountScope
 	MessageID     int64
 	Limit         int
 	Account       string
@@ -267,8 +266,6 @@ type SimilarSearch struct {
 }
 
 type CLIAccount struct {
-	VirtualAccounts []store.VirtualAccount `json:"virtual_accounts,omitempty"`
-
 	ID                 int64      `json:"id"`
 	Email              string     `json:"email"`
 	Type               string     `json:"type"`
@@ -1004,7 +1001,6 @@ func (c *Client) GetCLIHybridSearch(
 				Domain:          optionalString(req.Filter.Domain),
 				Label:           optionalString(req.Filter.Label),
 				ListID:          optionalString(req.Filter.ListID),
-				AccountScopes:   encodedAccountScopes(req.Filter.AccountScopes),
 				TimePeriod:      optionalString(req.Filter.TimeRange.Period),
 				TimeGranularity: optionalString(timeGranularityToString(req.Filter.TimeRange.Granularity)),
 				ConversationID:  req.Filter.ConversationID,
@@ -1040,18 +1036,10 @@ func (c *Client) FindSimilarMessages(
 	ctx context.Context,
 	req SimilarSearchRequest,
 ) (*SimilarSearch, error) {
-	filter := query.MessageFilter{AccountScopes: req.AccountScopes}
-	if err := search.ValidateAccountScopes(req.AccountScopes); err != nil {
-		return nil, err
-	}
-	if err := c.requireListIDCapability(ctx, nil, filter); err != nil {
-		return nil, err
-	}
 	resp, err := APIResponse(c, func(client *apiclient.Client) (*generated.FindSimilarMessagesResp, error) {
 		return client.FindSimilarMessagesWithResponse(ctx, &generated.FindSimilarMessagesRequestOptions{
 			Query: &generated.FindSimilarMessagesQuery{
 				MessageID:     req.MessageID,
-				AccountScopes: encodedAccountScopes(req.AccountScopes),
 				Limit:         optionalPositiveInt64(req.Limit),
 				Account:       optionalString(req.Account),
 				MessageType:   optionalString(req.MessageType),

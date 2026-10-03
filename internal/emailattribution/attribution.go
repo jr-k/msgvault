@@ -1,175 +1,135 @@
-// Package emailattribution derives an archive account from outer email headers.
-// It accepts confirmed candidates; it never discovers ownership or authorizes sending.
+// Package emailattribution decides which confirmed account received or sent
+// one email. It accepts confirmed candidates; it never discovers ownership or
+// authorizes sending.
 package emailattribution
 
 import (
+	"bufio"
 	"bytes"
+	"fmt"
 	"net/mail"
+	"net/textproto"
 	"slices"
 	"strings"
 )
 
+// MaxHeaderBytes bounds the outer header block read from stored MIME.
 const MaxHeaderBytes = 256 * 1024
 
-// Evidence is compact, re-evaluable header evidence. Addresses not yet confirmed
-// remain here so a new identity can target only messages mentioning it.
-type Evidence struct {
-	Original   []string `json:"original,omitempty"`
-	Delivery   []string `json:"delivery,omitempty"`
-	Visible    []string `json:"visible,omitempty"`
-	From       []string `json:"from,omitempty"`
-	Diagnostic []string `json:"diagnostic,omitempty"`
-	Malformed  bool     `json:"malformed,omitempty"`
+var (
+	originalHeaders  = []string{"X-Gm-Original-To", "X-Delivered-To", "X-Original-To"}
+	deliveredHeaders = []string{"Delivered-To", "X-Resolved-To", "X-Original-Delivered-To"}
+)
+
+// Headers holds the delivery addresses read from one message's outer headers.
+// Original names the address the message was first sent to before forwarding;
+// Delivered names mailboxes the message passed through on delivery.
+type Headers struct {
+	Original  []string
+	Delivered []string
 }
 
-type Result struct {
-	Address string
-	Path    string
-	Basis   string
-}
-
-// Parse reads only the outer header block, independently of MIME body validity.
-func Parse(raw []byte) Evidence {
-	end := len(raw)
-	for _, sep := range [][]byte{[]byte("\r\n\r\n"), []byte("\n\n")} {
-		if i := bytes.Index(raw, sep); i >= 0 && i+len(sep) < end {
-			end = i + len(sep)
-		}
-	}
-	if end > MaxHeaderBytes {
-		return Evidence{Malformed: true}
-	}
-	msg, err := mail.ReadMessage(bytes.NewReader(raw[:end]))
+// ParseHeaders reads delivery addresses from an outer header block. A value
+// that is not a valid address list is skipped whole and reported through the
+// malformed flag; other values still count. A block that is not a header block
+// at all returns an error.
+func ParseHeaders(block []byte) (Headers, bool, error) {
+	header, err := textproto.NewReader(bufio.NewReader(bytes.NewReader(block))).ReadMIMEHeader()
 	if err != nil {
-		return Evidence{Malformed: true}
+		return Headers{}, false, fmt.Errorf("read header block: %w", err)
 	}
-	var e Evidence
-	for _, item := range []struct {
-		names []string
-		dst   *[]string
-	}{
-		{[]string{"X-Gm-Original-To", "X-Delivered-To", "X-Original-To"}, &e.Original},
-		{[]string{"Delivered-To", "X-Resolved-To", "X-Original-Delivered-To"}, &e.Delivery},
-		{[]string{"To", "Cc"}, &e.Visible},
-		{[]string{"From"}, &e.From},
-		{[]string{"Bcc", "X-Forwarded-To", "X-Forwarded-For"}, &e.Diagnostic},
-	} {
-		for _, name := range item.names {
-			for _, value := range msg.Header[canonical(name)] {
-				addresses, err := mail.ParseAddressList(value)
+	var h Headers
+	malformed := false
+	collect := func(names []string) []string {
+		var out []string
+		for _, name := range names {
+			for _, value := range header[textproto.CanonicalMIMEHeaderKey(name)] {
+				list, err := mail.ParseAddressList(value)
 				if err != nil {
-					e.Malformed = true
+					malformed = true
 					continue
 				}
-				for _, a := range addresses {
+				for _, a := range list {
 					address := strings.ToLower(strings.TrimSpace(a.Address))
-					if address != "" && strings.Contains(address, "@") {
-						*item.dst = append(*item.dst, address)
+					if strings.Contains(address, "@") {
+						out = append(out, address)
 					}
 				}
 			}
 		}
+		return out
 	}
-	return e
+	h.Original = collect(originalHeaders)
+	h.Delivered = collect(deliveredHeaders)
+	return h, malformed, nil
 }
 
-func canonical(name string) string {
-	parts := strings.Split(strings.ToLower(name), "-")
-	for i, p := range parts {
-		if p != "" {
-			parts[i] = strings.ToUpper(p[:1]) + p[1:]
-		}
-	}
-	return strings.Join(parts, "-")
+// Evidence is everything Attribute compares against confirmed candidates.
+// Visible holds confirmed To/Cc matches; Sender holds confirmed sender matches.
+type Evidence struct {
+	Original, Delivered, Visible, Sender []string
 }
 
-func (e Evidence) Mentions() []string {
-	var all []string
-	for _, group := range [][]string{e.Original, e.Delivery, e.Visible, e.From, e.Diagnostic} {
-		all = append(all, group...)
-	}
-	slices.Sort(all)
-	return slices.Compact(all)
+// Result is the attributed account address, or "" when no single confirmed
+// address wins.
+type Result struct {
+	Address string
 }
 
-// Attribute returns a unique match at the strongest usable tier. The sink is
-// deferred behind visible recipients when it is only a final delivery address.
+// Attribute returns the unique confirmed match at the strongest tier. A sent
+// copy takes its unique confirmed sender and never the source default. Inbound
+// mail tries the original recipient, then upstream delivery addresses, then
+// visible recipients, then the final inbox, then the source default. More than
+// one match at a tier returns "" without trying lower tiers.
 func Attribute(e Evidence, candidates []string, sink string, sent bool) Result {
-	path := "inbound"
-	if sent {
-		path = "sent"
-	}
-	result := Result{Path: path}
 	allowed := make(map[string]bool, len(candidates))
 	for _, c := range candidates {
-		address, err := mail.ParseAddress(c)
-		if err == nil && address.Address == c && strings.Contains(c, "@") {
-			allowed[strings.ToLower(c)] = true
+		if c = normalize(c); strings.Contains(c, "@") {
+			allowed[c] = true
 		}
 	}
-	sink = strings.ToLower(sink)
-	match := func(group []string, basis string) bool {
-		matches := make(map[string]bool)
+	sink = normalize(sink)
+	// match reports whether the tier decided the result.
+	var result Result
+	match := func(group []string) bool {
+		var found []string
 		for _, v := range group {
-			if allowed[v] {
-				matches[v] = true
+			if v = normalize(v); allowed[v] && !slices.Contains(found, v) {
+				found = append(found, v)
 			}
 		}
-		if len(matches) == 0 {
+		switch len(found) {
+		case 0:
 			return false
+		case 1:
+			result.Address = found[0]
 		}
-		if len(matches) > 1 {
-			result.Basis = "ambiguous"
-			return true
-		}
-		for address := range matches {
-			result.Address = address
-		}
-		result.Basis = basis
 		return true
 	}
 	if sent {
-		from := e.From
-		if len(from) > 1 {
-			from = slices.Clone(from)
-			slices.Sort(from)
-			from = slices.Compact(from)
-		}
-		if len(from) > 1 {
-			result.Basis = "ambiguous"
-			return result
-		}
-		if match(from, "sent-from") {
-			return result
-		}
-		result.Basis = "unconfirmed-sender"
-		if len(from) == 0 {
-			result.Basis = "missing-sender"
-		}
+		match(e.Sender)
 		return result
 	}
-	if match(e.Original, "original-recipient") {
+	if match(e.Original) {
 		return result
 	}
 	var upstream, final []string
-	for _, address := range e.Delivery {
-		if sink != "" && address == sink {
+	for _, address := range e.Delivered {
+		if sink != "" && normalize(address) == sink {
 			final = append(final, address)
 		} else {
 			upstream = append(upstream, address)
 		}
 	}
-	if match(upstream, "delivery-chain") || match(e.Visible, "recipient-headers") || match(final, "final-inbox") {
+	if match(upstream) || match(e.Visible) || match(final) {
 		return result
 	}
-	if allowed[sink] && sink != "" {
+	if sink != "" && allowed[sink] {
 		result.Address = sink
-		result.Basis = "source-default"
-		return result
-	}
-	result.Basis = "missing-evidence"
-	if e.Malformed {
-		result.Basis = "malformed-evidence"
 	}
 	return result
+}
+
+func normalize(address string) string {
+	return strings.ToLower(strings.TrimSpace(address))
 }

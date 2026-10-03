@@ -165,6 +165,9 @@ func ImportEmlxDir(
 	defer func() {
 		retErr = errors.Join(retErr, execution.Release())
 	}()
+	if err := healDerived(ctx, st, src); err != nil {
+		return nil, err
+	}
 
 	// Resume support.
 	var (

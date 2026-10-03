@@ -4,31 +4,28 @@ last_edited: "2026-10-02"
 
 # Received-account attribution design
 
-**Historical design record; implemented in this change.** Current storage rules
-are owned by [Data Storage](../architecture/storage.md), and user-facing
-precedence and filters by [Searching](../usage/searching.md#forwarded-mail-and-virtual-accounts).
-The [benchmark report](received-as-identity-benchmark.md) records measured
-performance and its limits.
+**Historical design record.** Current storage rules are owned by
+[Data Storage](../architecture/storage.md), and user-facing search behavior by
+[Searching](../usage/searching.md#find-mail-by-the-address-that-received-it).
 
-One physical inbox can receive mail for several confirmed addresses. Attribution
-records the receiving address without changing source provenance or creating
-duplicate ingest sources. Sent mail uses its From identity; calendar events use
-the registered calendar rather than the sync credential or event creator.
+One physical inbox can receive mail for several confirmed addresses, for
+example work@ forwarding into a personal Gmail. Attribution records the
+receiving address without changing source provenance or creating duplicate
+ingest sources. Sent mail uses its confirmed sender; calendar events use the
+calendar's own mailbox rather than the sync credential or event creator.
 
 ## Attribution decision
 
-The approved decision on 2026-10-01 was one attributed account per message:
-nullable indexed `messages.account_address`. Conflicts stay in the unattributed
-bucket, and identity totals plus unattributed equal the eligible source total.
-Do not choose the first address or final inbox merely to fill the column.
-
-Overlapping memberships were rejected because their totals cannot be added like
-separately synced accounts. A scalar projection also supports indexed lists and
-Parquet facts. Derived labels would mix attribution with provider/user labels;
-virtual ingest sources would duplicate credentials, provenance and checkpoints.
+Each email and calendar row carries at most one account: nullable
+`messages.account_address`, plus `messages.account_path` (`inbound`, `sent` or
+`calendar`). Conflicting evidence stays unattributed, so identity totals plus
+unattributed rows equal the source total. Overlapping memberships were rejected
+because their totals cannot be added like separately synced accounts. Derived
+labels would mix attribution with provider labels, and virtual ingest sources
+would duplicate credentials, provenance and checkpoints.
 
 No personal archive or provider inventory was inspected. Header research used
-primary documentation, and ordinary fixtures use synthetic addresses. Historical
+primary documentation, and fixtures use synthetic addresses. Historical
 messages may lack the documented delivery fields.
 
 ## Delivery evidence and its limits
@@ -61,247 +58,31 @@ Sources checked on 2026-10-01:
 - [Gmail POP changes](https://support.google.com/mail/answer/16604719?hl=en) says existing users can continue until January 2027; this is a historical-archive path, not a prerequisite for new routing.
 
 These headers are attribution hints, not authenticated ownership or permission
-to send. When provider-specific original-recipient fields disagree, return
-ambiguity. A single strongest-tier candidate wins; lower-tier conflicts remain
-in the evidence report. When no original-recipient field resolves the address,
-evaluate non-primary delivery-chain candidates, then To/Cc, then a matched
-final inbox, then an explicit source-default fallback. A primary-only
-`Delivered-To` is deferred until after To/Cc: otherwise the common case of
-`To: work@example.com` and `Delivered-To: inbox@example.net` would always
-attribute to the sink and hide the work alias. Conflicts at an evaluated tier
-stop resolution; they must not fall through to a lower tier. Bcc recorded in
-an archive is diagnostic evidence only and never supplies attribution, even
-when it is the only confirmed recipient. A Bcc-delivered message needs a
-delivery-header match or the labelled source-default fallback. The regression fixtures include a unique archived Bcc without delivery headers.
+to send.
 
-For IMAP sources, resolve the primary inbox from the configured username, or
-the username in the connection identifier when configuration omits it. Validate
-it as a mailbox and retain source-confirmed identity checks. Candidate lookup,
-attribution and indexed fallback dependencies use this same address; the URL
-remains physical source provenance. Authoritative mailbox reconciliation uses
-the attribution-aware label helper inside its existing transaction so a Sent
-to Archive transition changes the account path without a MIME rewrite.
+## Attribution rules
 
-The primary inbox is a final-delivery candidate. If one other confirmed alias
-is supported by the delivery chain and the primary is only the final sink,
-attribute to that alias. Two non-primary matches stay ambiguous. A fallback is
-labelled `source-default`, never presented as proof of original delivery.
-Conflicting evidence yields NULL and basis `ambiguous`; it must not
-fall through to the source default. Missing evidence with a known default
-can use the source default. A source that intentionally disabled default
-identity confirmation must not silently regain it.
-
-## Candidate contract
-
-The pure helper in `internal/emailattribution` accepts normalized candidates
-and parsed outer-header evidence. It returns a match, no-match or ambiguity
-plus evidence basis. It does not call Gmail or mutate account identities.
-
-Pass the known final-inbox address explicitly; do not derive it from candidate
-ordering. Use the source identifier when it is a confirmed email identity, or
-the primary provider identity after owner confirmation. If no sink is known,
-evaluate all delivery candidates together and retain multiple matches as
-ambiguous. Normalize case using the existing identity helper; do not silently
-remove dots or plus suffixes from email local parts.
-
-Archive candidates are the source's confirmed email identities. Gmail's
-primary and accepted `sendAs` entries can be offered for owner confirmation by
-sending workflows; delivery headers never confirm an identity. Pending aliases are excluded
-from sender eligibility. Provider inventory failure leaves confirmed archive
-identities usable and reports unavailable inventory; it must not require a
-network call for an archive search or rebuild.
-
-Draft sender selection intersects confirmed ownership with provider sender
-eligibility and applies its explicit From/grant rules. A send-as entry does
-not prove that incoming mail was delivered there. Different domains,
-`treatAsAlias=false`, and SMTP relay use do not disqualify an otherwise accepted
-sender. Current `gmail.SendAs` omits `treatAsAlias` and relay metadata; avoid
-adding them unless the sibling's behavior needs them. Google's
-[SendAs reference](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.settings.sendAs)
-owns those provider fields.
-
-Archive attribution owns extraction; sending workflows own provider sender
-eligibility and identity bootstrap. Callers pass normalized candidates so the
-helper does not import Store. Provider identity-refresh integration must call
-`recomputeAccountIdentitiesWith` in its existing identity-locked transaction
-with newly added addresses, while preserving masked-token-only invalidation.
-
-## Account projection
-
-SQLite and PostgreSQL messages carry nullable `account_address`, nullable
-`account_path` and `account_attribution_basis` (default `not-derived`). Store
-owns versioned repair progress. `account_address` covers inbound, sent and
-calendar records. Source/address/date/ID and address/date/ID indexes support
-scoped lists and cross-source address searches.
-
-Preserve raw evidence and keep this projection recomputable. Do not change
-`source_id`, recipient rows, provider-native authorship or confirmed ownership.
-Provider-native sent labels/folders select the sent path; a unique
-confirmed From match supplies the sent identity. Receiving a message whose
-From happens to be an owned address must not by itself switch to the sent
-path. `source_is_from_me` is authorship evidence, not Sent evidence: the shared
-email importer historically infers it from From equality, including imports
-into an existing Gmail/IMAP source. Several distinct From addresses remain
-ambiguous; repeated copies of the same normalized address count as one sender.
-
-For sent mail, zero confirmed From matches yield NULL with basis
-`unconfirmed-sender`; an absent From yields `missing-sender`. The sent path
-never uses the source-default fallback. This prevents old imports from being
-assigned to the login address when their actual sending alias is unconfirmed.
-
-For calendars, use the registered calendar ID. `primary` maps to the token
-account; a confirmed email calendar ID maps to that identity. For opaque/group
-IDs, use an explicit calendar-to-confirmed-identity mapping; do not infer from
-the creator, organizer, access role or calendar title. Calendar selection does
-not itself confirm personal ownership. The Google
-[CalendarList reference](https://developers.google.com/workspace/calendar/api/v3/reference/calendarList)
-offers `dataOwner` for secondary calendars, but the current client drops it
-and owner metadata alone does not grant a source-scoped identity binding.
-Persist mappings in source configuration, invalidate attribution when changed,
-and include cancellation tombstones and recurrence instances in repair.
-An opaque calendar ID without a mapping yields NULL with basis
-`unmapped-calendar`. An email/primary ID without a source-confirmed identity
-yields `unconfirmed-calendar`. Calendar attribution never falls back to the
-authenticated account for a different calendar.
-
-The classifier sets `account_path` to `inbound`, `sent` or `calendar`, including
-when the result is unattributed. It never uses identity-derived `is_from_me`
-to choose a path. A row not yet processed has NULL path and basis
-`not-derived`. Successful bases are `original-recipient`, `delivery-chain`,
-`recipient-headers` (To/Cc), `final-inbox`, `source-default`, `sent-from` and
-`calendar`. Processed NULL results use `ambiguous`, `missing-evidence`,
-`malformed-evidence`, `unconfirmed-sender`, `missing-sender`,
-`unmapped-calendar` or `unconfirmed-calendar`. `missing-evidence` applies when
-there is no candidate and no permitted fallback; `malformed-evidence` applies
-when no usable evidence remains after parsing and no fallback is permitted.
-Store validates path/basis combinations. Keep path separate from basis so a
-sent ambiguity cannot be mistaken for an inbound ambiguity. Export all three
-fields to the cache. Other message types retain their existing projection. Changing an attributed
-message to another type clears its account with basis `not-applicable`. Repair
-progress counts only eligible email/calendar rows, including legacy empty types.
-
-Virtual-account selectors carry the physical source ID and normalized address.
-They never invent numeric source IDs. Multi-address sources can show identity
-children and an unattributed bucket; single-address sources keep their current
-account presentation. A physical source selection still includes all its rows.
-Collections continue to group physical sources. Selecting an identity within a
-collection intersects the address predicate with that collection's source IDs.
-
-Archived account listings and `query.AccountInfo` add an optional
-`virtual_accounts` array to physical sources. Children carry `key`, `source_id`,
-`account_address` or `group`, `unattributed`, `message_count`,
-`source_deleted_count` and `pending_count`. Keys are
-`identity:<source_id>:<base64url(address)>`,
-`group:<source_id>:<base64url(group)>` and `unattributed:<source_id>`.
-They identify read selections and never sources. The catalog includes zero-count
-confirmed email identities and the unattributed bucket. Pickers keep the ordinary
-single-primary-address presentation and show children for aliases or groups.
-
-Counts cover eligible email/calendar messages, exclude `deleted_at` rows, and
-separate active and source-deleted totals. SQL groups masks into one exclusive
-bucket. Confirmed identities plus unattributed partition eligible physical rows.
-The physical source still includes its chats and other message types.
-`/cli/accounts`, MCP, TUI and Web UI consume the archive projection;
-`/api/v1/accounts` remains physical scheduler configuration.
-
-Pending legacy rows belong to the unattributed bucket and carry `pending_count`.
-The Web UI displays that repair is incomplete. Exact identity filters return
-only rows whose attribution has been derived; run the explicit repair before
-comparing a legacy archive's identity counts. The implementation uses indexed maintenance
-instead of blocking source generations: confirmations recompute indexed dependencies
-atomically, while pending initial repair remains visible and additive.
-
-`account:<address>` provides exact search for inbound, sent and calendar attribution;
-`received:<address>` adds `message_type=email` and `account_path=inbound`.
-It never uses `is_from_me` to exclude sent rows. The reserved
-`account:unattributed` selects NULL attribution across these message types;
-`received:unattributed` restricts that bucket to inbound email. Other address
-values require a nonempty valid mailbox; no substring or domain wildcard.
-Repeated `account:` values form one OR group; repeated `received:` values
-form a separate OR group. AND those two groups with each other and with other
-filters. This is an explicit new contract: existing recipient operators have
-OR semantics in query engines but AND semantics in Store search. The new groups use OR on every path; existing recipient operator semantics
-remain unchanged. A structured multi-select can OR addresses within its
-group, then AND that group with source, collection,
-deletion and other filters. Malformed values fail validation at every front
-door. Expose the same account-address selector in API, MCP, CLI, TUI and Web UI
-filters and stats. An explicit account selector supplies its email/calendar
-scope to totals and aggregates, so the generic email default cannot exclude
-mapped calendars. A received selector still restricts the scope to inbound
-email. Source identifier and source-pinned key resolution use `SourceAccountLister`
-and `/api/v1/cli/source-accounts` without message totals; unqualified aliases
-load the virtual catalog to detect ambiguity. Older daemons can use the existing
-physical catalog fallback. Keep transport fields additive, update OpenAPI/generated
-clients, and never reinterpret an existing numeric account selector.
-
-The structured selector uses `account_addresses` for normalized addresses or
-`account_unattributed=true` for NULL attribution; these fields are mutually
-exclusive. Both are optional and preserve the existing unfiltered behavior
-when omitted. API and query-engine filters share these semantics; MCP accepts a source-pinned
-virtual key or unique address/group in its account parameter;
-CLI search uses the operators, while TUI/Web UI bucket selection sends the
-structured unattributed selector. Source/collection restrictions still apply
-to the bucket. This selects all NULL bases, including ambiguous, unmapped and
-not-yet-derived rows; progress must distinguish incomplete repair from evidence
-that was processed and remained unattributed.
-
-Export attribution and basis into analytics message facts. Update cache schema
-versioning, incremental change journals, identity-change invalidation, facets
-and account statistics. Stale caches must use eligible live SQL or the existing
-readiness error until rebuilt; they must not silently omit the filter. Carry
-filters through keyword, fast search, hybrid and vector retrieval before
-pagination so limits and totals are accurate. No list, aggregate or search path
-may read MIME or scan `message_bodies`.
-
-## Fastmail masks at scale
-
-`account:fastmail-masked:<account>` selects a source's confirmed masked identities
-as one group. `received:<address>` always selects one exact inbound identity.
-The archive catalog collapses 1000+ masks into one group row. Queries use an
-indexed membership lookup instead of expanding masks into parameters.
-
-Provider identity records preserve `provider-alias` and add the exact signal
-`fastmail-masked-email` for masked-email membership. Store exposes
-`account_identity_group_memberships` and
-`RecomputeAccountAttributionForIdentitiesContext(ctx, sourceID, addresses)`.
-The provider refresh owns metadata and the membership stamp; integration status
-is recorded in Kata. This does not change
-the confirmed-identity ownership authority or draft authorization.
-
-## Backfill and incremental maintenance
-
-1. Initialize nullable indexed account facts, compact evidence, indexed mentions
-   and a source-scoped repair cursor. Initialization does not parse the archive.
-2. `repair-account-attribution` runs through the daemon. Each page takes the
-   existing identity-mutation lock, captures or resumes a fixed high-water ID
-   and rule version, and reads at most 500 eligible message IDs in key order.
-   It loads MIME by primary key, or immutable recipient snapshots if MIME is
-   absent. Calendar rows use source configuration and event metadata.
-3. Projection updates, evidence/mentions and the cursor commit together.
-   Cancellation rolls back the page. Checkpoints run after commit. Conditional
-   writes make replay a no-op, including derived-cache revisions.
-4. Confirmation/removal transactions hold the same identity lock and revisit
-   only indexed mention matches. Source-default and calendar identities are
-   dependencies too. Mapping changes recompute that source's calendar events.
-   Provider config refreshes preserve explicit calendar mappings. A rule-version
-   change restarts repair without an initial lower bound, including zero and
-   negative message IDs. The shared lock replaces per-source candidate fingerprints and mapping
-   generations.
-5. Sync/import persistence, raw/recipient repairs, label changes and calendar
-   metadata updates derive current attribution in their write transaction.
-   A repair cannot overwrite newer evidence. New rows above the repair's fixed
-   high-water mark are maintained by these write paths. A completed cursor is
-   an idempotent no-op; targeted identity changes still apply after completion.
-
-Calendar mapping changes commit the mapping and every affected event projection
-together. A large calendar can hold the identity lock for a long transaction.
-Paged mapping changes remain follow-up work: they need a visible pending mapping
-generation so readers can distinguish old projections from the new mapping.
-
-For 150k messages, initial repair costs O(messages + header bytes read).
-Compressed MIME still requires decompression on initial repair. Compact outer
-header evidence and an indexed mention table retain unconfirmed addresses.
-Identity additions/removals revisit only messages with matching mentions.
-Source-default and calendar mappings register their address dependencies too.
-Identity changes reuse compact evidence without MIME decompression. Index construction and cache regeneration also cost
-one archive pass; measure them separately from steady-state search latency.
+- Candidates are the source's confirmed identities. Delivery headers never
+  confirm an identity. Every input is lowercased before comparison; dots and
+  plus suffixes stay significant.
+- Only the outer header block is read, bounded at 256 KiB. A header value that
+  is not a valid address list is skipped whole; other values still count.
+- Provider Sent evidence decides direction: a Sent folder role, or Gmail's
+  `SENT` label, on the message's own source. Ownership of the From address
+  does not.
+- A sent copy takes its unique confirmed sender. It never falls back to the
+  source mailbox.
+- Inbound mail tries, in order: original-recipient headers (`X-Gm-Original-To`,
+  `X-Delivered-To`, `X-Original-To`), upstream delivery addresses
+  (`Delivered-To`, `X-Resolved-To`, `X-Original-Delivered-To`, excluding the
+  source mailbox), confirmed To/Cc matches, the source mailbox as final inbox,
+  then the source mailbox when it is confirmed. Bcc never counts.
+- More than one confirmed match at a tier leaves the row unattributed, and no
+  lower tier runs.
+- The source mailbox is the source identifier, or the IMAP username in the
+  connection URL, when it is a valid mailbox.
+- A calendar event takes the account email of the primary calendar, or a
+  calendar ID that is itself a confirmed mailbox. Google group and resource
+  calendars stay unattributed.
+- Rows written by older versions stay pending (`account_path IS NULL`) until
+  the source's next sync or `msgvault repair-derived` derives them.

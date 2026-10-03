@@ -57,19 +57,24 @@ const emailOnlyFilterMsg = "(msg.message_type = '" + messageTypeEmail + "' OR ms
 // NULL and empty string handle old data where message_type was not yet populated.
 const emailOnlyFilterM = "(m.message_type = '" + messageTypeEmail + "' OR m.message_type IS NULL OR m.message_type = '')"
 
-// shouldDefaultStatsToEmail reports whether a generic stats query should use
-// the positive email-only default. Search result stats opt into the same broad
-// message-type scope as search. Account selectors supply an explicit
-// email/calendar scope, while an explicit message_type remains authoritative.
-func shouldDefaultStatsToEmail(opts StatsOptions) bool {
-	if opts.SearchScope || (opts.Filter != nil && len(opts.Filter.AccountScopes) > 0) {
+// hasExplicitMessageTypeSearch reports whether a parsed search query selects
+// one or more message types. Default analytics use this to apply the positive
+// email-only predicate without overriding an explicit message-type scope.
+func hasExplicitMessageTypeSearch(searchQuery string) bool {
+	if searchQuery == "" {
 		return false
 	}
-	if opts.SearchQuery == "" {
-		return true
-	}
-	parsed := search.Parse(opts.SearchQuery)
-	return len(parsed.MessageTypes) == 0 && len(parsed.AccountScopes) == 0
+	// account: covers calendar rows too, so it must not default to email.
+	q := search.Parse(searchQuery)
+	return len(q.MessageTypes) > 0 || len(q.AccountAddrs) > 0
+}
+
+// shouldDefaultStatsToEmail reports whether a generic stats query should use
+// the positive email-only default. Search result stats opt into the same broad
+// message-type scope as search, while an explicit message_type remains
+// authoritative in either mode.
+func shouldDefaultStatsToEmail(opts StatsOptions) bool {
+	return !opts.SearchScope && !hasExplicitMessageTypeSearch(opts.SearchQuery)
 }
 
 // effectiveStatsFilter returns the complete message scope for a stats query.

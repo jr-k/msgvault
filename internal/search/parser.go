@@ -4,6 +4,7 @@ package search
 import (
 	"errors"
 	"fmt"
+	"net/mail"
 	"regexp"
 	"strconv"
 	"strings"
@@ -12,10 +13,6 @@ import (
 
 // Query represents a parsed search query with all supported filters.
 type Query struct {
-	// Plain operators share alternatives, but never merge into transported scopes.
-	accountOperatorScopeIndexes map[bool]int
-	AccountScopes               []AccountScope // attributed account OR groups, intersected across dimensions
-
 	TextTerms       []string   // Full-text search terms
 	FromAddrs       []string   // from: filters
 	ToAddrs         []string   // to: filters
@@ -24,6 +21,8 @@ type Query struct {
 	SubjectTerms    []string   // subject: filters
 	Labels          []string   // label: filters
 	ListIDs         []string   // list: or list-id: filters
+	AccountAddrs    []string   // account: exact attributed account address
+	ReceivedAddrs   []string   // received: exact address that received the message
 	HasAttachment   *bool      // has:attachment
 	BeforeDate      *time.Time // before: filter
 	AfterDate       *time.Time // after: filter
@@ -119,7 +118,7 @@ type UnsupportedOperator struct {
 
 // IsEmpty returns true if the query has no search criteria.
 func (q *Query) IsEmpty() bool {
-	return len(q.AccountScopes) == 0 && len(q.TextTerms) == 0 &&
+	return len(q.TextTerms) == 0 &&
 		len(q.FromAddrs) == 0 &&
 		len(q.ToAddrs) == 0 &&
 		len(q.CcAddrs) == 0 &&
@@ -127,6 +126,8 @@ func (q *Query) IsEmpty() bool {
 		len(q.SubjectTerms) == 0 &&
 		len(q.Labels) == 0 &&
 		len(q.ListIDs) == 0 &&
+		len(q.AccountAddrs) == 0 &&
+		len(q.ReceivedAddrs) == 0 &&
 		len(q.ListIDExactGroups) == 0 &&
 		q.HasAttachment == nil &&
 		q.BeforeDate == nil &&
@@ -220,9 +221,6 @@ const (
 )
 
 var operators = map[string]operatorFn{
-	"account_scope": structuredAccountOperator,
-	"account":       accountOperator(false),
-	"received":      accountOperator(true),
 	"from": func(q *Query, v string, _ time.Time) error {
 		q.FromAddrs = append(q.FromAddrs, normalizeAddr(v))
 		return nil
@@ -263,8 +261,10 @@ var operators = map[string]operatorFn{
 		}
 		return nil
 	},
-	"list":    listIDOperator("list"),
-	"list-id": listIDOperator("list-id"),
+	"list":     listIDOperator("list"),
+	"list-id":  listIDOperator("list-id"),
+	"account":  accountAddressOperator("account", func(q *Query) *[]string { return &q.AccountAddrs }),
+	"received": accountAddressOperator("received", func(q *Query) *[]string { return &q.ReceivedAddrs }),
 	"has": func(q *Query, v string, _ time.Time) error {
 		switch strings.ToLower(strings.TrimSpace(v)) {
 		case "attachment", "attachments":
@@ -360,6 +360,19 @@ func listIDOperator(name string) operatorFn {
 	}
 }
 
+// accountAddressOperator accepts one exact email address, lowercased.
+func accountAddressOperator(name string, field func(*Query) *[]string) operatorFn {
+	return func(q *Query, value string, _ time.Time) error {
+		value = strings.ToLower(strings.TrimSpace(value))
+		parsed, err := mail.ParseAddress(value)
+		if err != nil || parsed.Address != value || !strings.Contains(value, "@") {
+			return operatorValueError(name, value, "expected an exact email address")
+		}
+		*field(q) = append(*field(q), value)
+		return nil
+	}
+}
+
 // Parser holds configuration for query parsing.
 type Parser struct {
 	Now func() time.Time // Time source (mockable for testing)
@@ -377,6 +390,8 @@ func NewParser() *Parser {
 //   - subject: - subject text search
 //   - label: or l: - label filter
 //   - list: or list-id: - mailing list identifier filter
+//   - account: - exact address of the account a message belongs to
+//   - received: - exact address of the account that received a message
 //   - has:attachment - attachment filter
 //   - before:, after: - date filters (YYYY-MM-DD)
 //   - older_than:, newer_than: - relative date filters (e.g., 7d, 2w, 1m, 1y)
@@ -607,13 +622,15 @@ func parseRelativeDate(value string, now time.Time) *time.Time {
 // HasOperators returns true if the query contains any structured
 // operators beyond plain text terms.
 func (q *Query) HasOperators() bool {
-	return len(q.AccountScopes) > 0 || len(q.FromAddrs) > 0 ||
+	return len(q.FromAddrs) > 0 ||
 		len(q.ToAddrs) > 0 ||
 		len(q.CcAddrs) > 0 ||
 		len(q.BccAddrs) > 0 ||
 		len(q.SubjectTerms) > 0 ||
 		len(q.Labels) > 0 ||
 		len(q.ListIDs) > 0 ||
+		len(q.AccountAddrs) > 0 ||
+		len(q.ReceivedAddrs) > 0 ||
 		q.HasAttachment != nil ||
 		q.BeforeDate != nil ||
 		q.AfterDate != nil ||

@@ -61,9 +61,8 @@ separately. SQLite is the default and stores the archive at `~/.msgvault/msgvaul
 | `message_type` | TEXT | `email`, `calendar_event`, `meeting_transcript`, `beeper`, `teams`, `discord`, `sms`, `mms`, `whatsapp`, `imessage`, `fbmessenger`, `synctech_sms_call`, `google_voice_text`, `google_voice_call`, `google_voice_voicemail` |
 | `sent_at` | DATETIME | Send timestamp |
 | `sender_id` | INTEGER FK | References `participants` |
-| `account_address` | TEXT, nullable | One attributed email/calendar address; ambiguity stays NULL |
-| `account_path` | TEXT, nullable | `inbound`, `sent`, or `calendar` |
-| `account_attribution_basis` | TEXT | Evidence basis, ambiguity, or pending `not-derived` |
+| `account_address` | TEXT, nullable | The one confirmed address an email or calendar event belongs to; NULL when evidence conflicts or is missing |
+| `account_path` | TEXT, nullable | `inbound`, `sent` or `calendar`; NULL on email and calendar rows means attribution is still pending |
 | `subject` | TEXT | Message subject |
 | `snippet` | TEXT | Preview excerpt |
 | `size_estimate` | INTEGER | Approximate size in bytes |
@@ -71,37 +70,19 @@ separately. SQLite is the default and stores the archive at `~/.msgvault/msgvaul
 | `deleted_at` | DATETIME | Soft-delete timestamp |
 | `deleted_from_source_at` | DATETIME | Records removal from the source; content may remain archived |
 
-Account facts are independent of sync credentials and `is_from_me` ownership.
-The Store derives them in message, raw-header, recipient, label and calendar
-write transactions. They have global and source-scoped address indexes.
+The Store derives `account_address` and `account_path` in the same transaction
+as every write that changes their inputs: raw MIME, recipients, Sent labels,
+confirmed identities and the source identifier. They never change `source_id`.
+Rows other than email and calendar events keep both columns NULL. The
+[received-account design](../internal/received-as-identity-design.md) records
+the rules; [Searching](../usage/searching.md#find-mail-by-the-address-that-received-it)
+covers `received:` and `account:`.
 
-`message_account_evidence` keeps compact outer-header addresses.
-`message_account_mentions` indexes source/message/address relationships,
-including unconfirmed addresses. Confirmation/removal transactions use this
-index to recompute matching messages. Calendar configuration can set an explicit
-`account_address` for an opaque calendar ID. Provider config refreshes preserve
-that mapping until explicitly replaced or cleared; the address must still be
-confirmed for the source.
-
-`account_attribution_repair_progress` commits a source's rule version, fixed
-high-water ID and page cursor with its facts. Initial repair runs through the
-daemon, rather than during startup or search. Pending rows stay unattributed.
-[`repair-account-attribution`](../cli-reference.md#repair-account-attribution)
-resumes interrupted work. [`Searching`](../usage/searching.md#forwarded-mail-and-virtual-accounts)
-owns precedence and filter behavior.
-
-Shared subsets omit confirmed account ownership and reset these facts to
-`not-derived`. Confirm identities in the destination before repairing its
-projection; participant identity export does not transfer account ownership.
-
-`account_identity_group_memberships` is a source-scoped view over confirmed
-identities. A `fastmail-masked-email` signal places an identity in
-`fastmail-masked:<source identifier>`. Analytics exports this membership and all
-three account facts. Cache schema 31 requires rebuilding older snapshots.
-Attribution changes use the message-scoped cache journal. New messages remain
-incremental appends; changes to already exported facts require a cache refresh.
-Virtual account rows retain the physical source ID and never create credentials,
-cursors or scheduler entries.
+**message_delivery_addresses** -- Delivery-header addresses read from each
+email's stored MIME (`kind` is `original` or `delivered`, `address` is
+lowercased). The address-leading index lets an identity change re-derive only
+the messages that mention it. A derived row's addresses always match its stored
+MIME; messages without MIME have none.
 
 **message_bodies** -- Parsed content stored separately from message metadata.
 

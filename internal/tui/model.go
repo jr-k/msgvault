@@ -15,7 +15,6 @@ import (
 	"go.kenn.io/msgvault/internal/peoplebrowser"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/search"
-	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/update"
 )
 
@@ -97,12 +96,9 @@ const (
 	sourceScopeAll sourceScopeKind = iota
 	sourceScopeAccount
 	sourceScopeCollection
-	sourceScopeVirtual
 )
 
 type sourceScope struct {
-	virtualAccount *store.VirtualAccount
-
 	kind           sourceScopeKind
 	accountID      *int64
 	collectionName string
@@ -115,12 +111,9 @@ const (
 	scopeOptionAll scopeOptionKind = iota
 	scopeOptionAccount
 	scopeOptionCollection
-	scopeOptionVirtual
 )
 
 type scopeOption struct {
-	virtualAccount *store.VirtualAccount
-
 	kind       scopeOptionKind
 	label      string
 	accountID  *int64
@@ -137,24 +130,6 @@ func accountSourceScope(id *int64) sourceScope {
 	return sourceScope{kind: sourceScopeAccount, accountID: &idCopy}
 }
 
-func virtualSourceScope(v store.VirtualAccount) sourceScope {
-	id := v.SourceID
-	return sourceScope{kind: sourceScopeVirtual, accountID: &id, virtualAccount: &v}
-}
-
-func virtualAccountLabel(v store.VirtualAccount) string {
-	if v.Group != "" {
-		return v.Group
-	}
-	if v.Unattributed {
-		if v.PendingCount > 0 {
-			return fmt.Sprintf("Unattributed (%d awaiting repair)", v.PendingCount)
-		}
-		return "Unattributed"
-	}
-	return v.AccountAddress
-}
-
 func collectionSourceScope(collection query.CollectionScope) sourceScope {
 	return sourceScope{
 		kind:           sourceScopeCollection,
@@ -164,9 +139,6 @@ func collectionSourceScope(collection query.CollectionScope) sourceScope {
 }
 
 func (s sourceScope) title(accounts []query.AccountInfo) string {
-	if s.virtualAccount != nil {
-		return virtualAccountLabel(*s.virtualAccount)
-	}
 	if s.kind == sourceScopeCollection {
 		return "Collection: " + s.collectionName
 	}
@@ -184,24 +156,9 @@ func (s sourceScope) title(accounts []query.AccountInfo) string {
 func (s sourceScope) apply(filter *query.MessageFilter) {
 	filter.SourceID = nil
 	filter.SourceIDs = nil
-	filter.AccountScopes = nil
 	switch s.kind {
 	case sourceScopeAll:
 		return
-	case sourceScopeVirtual:
-		if s.virtualAccount != nil {
-			v := s.virtualAccount
-			id := v.SourceID
-			filter.SourceID = &id
-			scope := search.AccountScope{Unattributed: v.Unattributed}
-			if v.AccountAddress != "" {
-				scope.Addresses = []string{v.AccountAddress}
-			}
-			if v.Group != "" {
-				scope.Groups = []string{v.Group}
-			}
-			filter.AccountScopes = []search.AccountScope{scope}
-		}
 	case sourceScopeAccount:
 		if s.accountID != nil {
 			id := *s.accountID
@@ -231,26 +188,6 @@ func (m Model) scopeOptions() []scopeOption {
 	for _, account := range m.accounts {
 		id := account.ID
 		options = append(options, scopeOption{kind: scopeOptionAccount, label: account.Identifier, accountID: &id})
-		// Preserve the single-address source picker. Show virtual children
-		// when aliases/groups divide the source or repair is incomplete.
-		named := 0
-		for _, v := range account.VirtualAccounts {
-			if !v.Unattributed {
-				named++
-			}
-		}
-		grouped := false
-		pending := false
-		for _, v := range account.VirtualAccounts {
-			grouped = grouped || v.Group != "" || (v.AccountAddress != "" && v.AccountAddress != account.Identifier)
-			pending = pending || v.PendingCount > 0
-		}
-		if named > 1 || grouped || pending {
-			for _, v := range account.VirtualAccounts {
-				vCopy := v
-				options = append(options, scopeOption{kind: scopeOptionVirtual, label: "  " + virtualAccountLabel(v), virtualAccount: &vCopy, accountID: &id})
-			}
-		}
 	}
 	for _, collection := range m.collectionScopes {
 		options = append(options, scopeOption{kind: scopeOptionCollection, label: collection.Name,
@@ -275,8 +212,6 @@ func (s sourceScope) matches(option scopeOption) bool {
 	switch option.kind {
 	case scopeOptionAll:
 		return s.kind == sourceScopeAll
-	case scopeOptionVirtual:
-		return s.kind == sourceScopeVirtual && s.virtualAccount != nil && option.virtualAccount != nil && s.virtualAccount.Key == option.virtualAccount.Key && s.virtualAccount.SourceID == option.virtualAccount.SourceID
 	case scopeOptionAccount:
 		return s.kind == sourceScopeAccount && s.accountID != nil && option.accountID != nil && *s.accountID == *option.accountID
 	case scopeOptionCollection:
@@ -765,12 +700,6 @@ func (m Model) loadStats() tea.Cmd {
 			}
 			opts.SourceID = m.sourceScope.accountID
 			opts.SourceIDs = copySourceIDs(m.sourceScope.sourceIDs)
-			if m.sourceScope.virtualAccount != nil {
-				f := emailScopedMessageFilter(query.MessageFilter{})
-				m.sourceScope.apply(&f)
-				opts.Filter = &f
-			}
-
 			stats, err := m.engine.GetTotalStats(context.Background(), opts)
 			return statsLoadedMsg{stats: stats, err: err, requestID: requestID, presentationGeneration: presentationGeneration}
 		},

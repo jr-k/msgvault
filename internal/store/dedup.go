@@ -501,7 +501,22 @@ func (s *Store) MergeDuplicates(
 			SET deleted_at = %s, delete_batch_id = ?
 			WHERE id = ?`, s.dialect.Now())
 
-	err := s.withTx(func(tx *loggedTx) error {
+	ctx := context.Background()
+	lock := attributionLock{}
+	for _, id := range append([]int64{survivorID}, duplicateIDs...) {
+		sourceID, err := s.messageSourceIDContext(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if sourceID != 0 {
+			lock.Sources = append(lock.Sources, sourceID)
+		}
+	}
+	err := s.withAttributionTxContext(ctx, lock, func(tx *loggedTx) error {
+		sentBefore, err := messageHasSentEvidenceTx(ctx, tx, survivorID)
+		if err != nil {
+			return err
+		}
 		for _, dupID := range duplicateIDs {
 			res, err := tx.Exec(unionLabelsSQL, survivorID, dupID)
 			if err != nil {
@@ -541,7 +556,16 @@ func (s *Store) MergeDuplicates(
 				return fmt.Errorf("soft-delete duplicate %d: %w", dupID, err)
 			}
 		}
-		return nil
+		if result.RawMIMEBackfilled > 0 {
+			_, err := s.refreshAccountAttributionTx(ctx, tx, survivorID, deliveryInput{reloadMIME: true})
+			return err
+		}
+		sentAfter, err := messageHasSentEvidenceTx(ctx, tx, survivorID)
+		if err != nil || sentAfter == sentBefore {
+			return err
+		}
+		_, err = s.refreshAccountAttributionTx(ctx, tx, survivorID, deliveryInput{})
+		return err
 	})
 	return result, err
 }
