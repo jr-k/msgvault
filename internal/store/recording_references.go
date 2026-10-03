@@ -139,16 +139,16 @@ type RecordingReferenceResult struct {
 func (s *Store) ReconcileRecordingReferences(ctx context.Context, destination string, messageID int64, live bool, refs []RecordingReferenceInput) error {
 	return s.withTxContext(ctx, func(tx *loggedTx) error {
 		q := boundQuerier{ctx: ctx, q: tx}
-		rows, err := tx.QueryContext(ctx, `SELECT route_key, ref_sha256, state, occurrence_id FROM recording_references WHERE destination_key=? AND message_id=?`, destination, messageID)
+		rows, err := tx.QueryContext(ctx, `SELECT route_key, ref_sha256, state, occurrence_id, occurrence_json FROM recording_references WHERE destination_key=? AND message_id=?`, destination, messageID)
 		if err != nil {
 			return err
 		}
-		type previous struct{ hash, state, receipt string }
+		type previous struct{ hash, state, receipt, occurrence string }
 		old := make(map[string]previous)
 		for rows.Next() {
 			var key string
 			var p previous
-			if err := rows.Scan(&key, &p.hash, &p.state, &p.receipt); err != nil {
+			if err := rows.Scan(&key, &p.hash, &p.state, &p.receipt, &p.occurrence); err != nil {
 				_ = rows.Close()
 				return err
 			}
@@ -163,12 +163,13 @@ func (s *Store) ReconcileRecordingReferences(ctx context.Context, destination st
 		if live {
 			for _, ref := range refs {
 				p, exists := old[ref.RouteKey]
+				unchanged := p.hash == ref.RefSHA256 && p.occurrence == ref.OccurrenceJSON
 				delete(old, ref.RouteKey)
 				if !exists {
 					_, err = q.Exec(`INSERT INTO recording_references (destination_key,message_id,route_key,kind,origin,ref_sha256,operation_id,occurrence_json,state,next_action_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'pending',?,?)`, destination, messageID, ref.RouteKey, ref.Kind, ref.Origin, ref.RefSHA256, uuid.NewString(), ref.OccurrenceJSON, now, now)
-				} else if p.hash != ref.RefSHA256 && p.state != "uncertain" {
+				} else if !unchanged && p.state != "uncertain" {
 					_, err = q.Exec(`UPDATE recording_references SET kind=?,origin=?,ref_sha256=?,operation_id=?,occurrence_json=?,state='pending',next_action_at=?,updated_at=?,error_code='',source_id='',occurrence_id='',outcome='',coverage_state='',last_send_at=NULL,retry_count=0 WHERE destination_key=? AND message_id=? AND route_key=?`, ref.Kind, ref.Origin, ref.RefSHA256, uuid.NewString(), ref.OccurrenceJSON, now, now, destination, messageID, ref.RouteKey)
-				} else if p.hash == ref.RefSHA256 && p.state == "withdrawn" {
+				} else if unchanged && p.state == "withdrawn" {
 					state := "pending"
 					if p.receipt != "" {
 						state = "retained"

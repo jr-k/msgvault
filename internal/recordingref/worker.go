@@ -289,8 +289,8 @@ func (w *Worker) deliver(ctx context.Context, claim store.RecordingReferenceClai
 		if w.logger != nil {
 			w.logger.Info("Recording reference delivery", "message_id", claim.MessageID, "route_key", claim.RouteKey, "state", result.State, "error_code", result.ErrorCode, "source_id", result.SourceID, "occurrence_id", result.OccurrenceID, "outcome", result.Outcome, "coverage_state", result.CoverageState)
 		}
-		// A changed live reference can replace its old request only after receipt recovery.
-		if exists && result.State == "withdrawn" {
+		// Deferred request changes can replace the old operation only after it settles.
+		if exists && (result.State == "retained" || result.State == "withdrawn") {
 			return w.reconcile(ctx, m)
 		}
 		return nil

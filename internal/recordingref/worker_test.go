@@ -688,3 +688,104 @@ func TestRecordingReferenceSecrets(t *testing.T) {
 	require.Error(err)
 	assert.NotContains(err.Error(), "secret")
 }
+
+func TestRecordingReferenceOccurrenceCorrection(t *testing.T) {
+	for _, field := range []string{"sent_at", "source_message_id"} {
+		for _, settlement := range []string{"retained", "replay", "receipt"} {
+			t.Run(field+"/"+settlement, func(t *testing.T) {
+				assert, require := assert.New(t), require.New(t)
+				f := storetest.New(t)
+				id := f.NewMessage().WithSourceMessageID("original").WithSentAt(time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)).Create(t, f.Store)
+				recordingBody(t, f, id, "https://loom.com/share/abc")
+				requests := make(chan docbankmedia.ReferenceRequest, 5)
+				gets := make(chan string, 2)
+				var posts atomic.Int32
+				var ready atomic.Bool
+				ready.Store(settlement == "retained")
+				client := recordingClient(t, func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodGet {
+						gets <- r.URL.Path
+						writeReceipt(w, strings.TrimPrefix(r.URL.Path, "/api/v1/media/operations/"))
+						ready.Store(true)
+						return
+					}
+					var req docbankmedia.ReferenceRequest
+					if !assert.NoError(json.UnmarshalRead(r.Body, &req)) {
+						return
+					}
+					requests <- req
+					post := posts.Add(1)
+					if !ready.Load() {
+						if settlement == "receipt" && post > 1 {
+							w.WriteHeader(http.StatusUnauthorized)
+						} else {
+							w.WriteHeader(http.StatusServiceUnavailable)
+						}
+						return
+					}
+					writeReceipt(w, req.OperationID)
+				})
+				worker := NewWorker(f.Store, client, "destination", nil, nil)
+				runDiscovery(t, worker, 1)
+				require.Len(requests, 1)
+				original := <-requests
+				value := "corrected"
+				if field == "sent_at" {
+					value = "2026-01-01 10:00:00.000"
+				}
+				_, err := f.Store.DB().Exec(f.Store.Rebind(`UPDATE messages SET `+field+`=? WHERE id=?`), value, id)
+				require.NoError(err)
+				assert.Eventually(func() bool {
+					result, err := worker.RunBatch(t.Context())
+					require.NoError(err)
+					return result.Examined > 0
+				}, 5*time.Second, 10*time.Millisecond)
+				if settlement != "retained" {
+					state, _, op := recordingState(t, f, id)
+					assert.Equal("uncertain", state)
+					assert.Equal(original.OperationID, op)
+					assert.Empty(requests)
+					if settlement == "replay" {
+						ready.Store(true)
+					}
+					due(t, f)
+					_, err = worker.RunBatch(t.Context())
+					require.NoError(err)
+					if settlement == "receipt" {
+						require.Len(requests, 1)
+						assert.Equal(original, <-requests)
+						due(t, f)
+						_, err = worker.RunBatch(t.Context())
+						require.NoError(err)
+						require.Len(gets, 1)
+						assert.Equal("/api/v1/media/operations/"+original.OperationID, <-gets)
+					} else {
+						require.Len(requests, 1)
+						assert.Equal(original, <-requests)
+					}
+					state, _, op = recordingState(t, f, id)
+					assert.Equal("pending", state)
+					assert.NotEqual(original.OperationID, op)
+					_, err = worker.RunBatch(t.Context())
+					require.NoError(err)
+				}
+				require.Len(requests, 1)
+				corrected := <-requests
+				assert.NotEqual(original.OperationID, corrected.OperationID)
+				assert.Equal(original.ReferenceURL, corrected.ReferenceURL)
+				if field == "sent_at" {
+					assert.NotEqual(original.Occurrence.Revision, corrected.Occurrence.Revision)
+					assert.Equal("2026-01-01T10:00:00Z", corrected.Occurrence.Message.Normalized)
+					assert.Equal(original.Occurrence.Ref, corrected.Occurrence.Ref)
+				} else {
+					assert.NotEqual(original.Occurrence.Ref, corrected.Occurrence.Ref)
+					assert.Equal(original.Occurrence.Revision, corrected.Occurrence.Revision)
+				}
+				_, err = worker.RunBatch(t.Context())
+				require.NoError(err)
+				assert.Empty(requests)
+				assert.Empty(gets)
+			})
+		}
+	}
+}
