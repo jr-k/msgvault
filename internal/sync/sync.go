@@ -1199,14 +1199,7 @@ func (s *Syncer) runWithSyncExecution(
 		return nil, fmt.Errorf("load source %d: %w", sourceID, err)
 	}
 	if src != nil {
-		sum, ran, err := rederive.RunIfStale(ctx, s.store, src.SourceType, src.Identifier, src.ID, nil)
-		if err != nil {
-			return nil, fmt.Errorf("re-derive archived messages: %w", err)
-		}
-		if ran && sum != nil {
-			s.logger.Info("re-derived archived messages",
-				"source_id", src.ID, "messages", sum.MessagesScanned, "undecodable", sum.Undecodable)
-		}
+		rederive.Heal(ctx, s.logger, s.store, src)
 	}
 	return run(execution)
 }

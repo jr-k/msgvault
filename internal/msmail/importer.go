@@ -86,9 +86,7 @@ func Import(ctx context.Context, st *store.Store, c *Client, opts Options, log *
 		mergeCursors(cursors, cp.CursorBefore.String)
 	}
 
-	if _, _, err := rederive.RunIfStale(ctx, st, src.SourceType, src.Identifier, src.ID, nil); err != nil {
-		return nil, fmt.Errorf("re-derive archived messages: %w", err)
-	}
+	rederive.Heal(ctx, log, st, src)
 	syncID, err := st.StartSync(src.ID, SourceType)
 	if err != nil {
 		return nil, err

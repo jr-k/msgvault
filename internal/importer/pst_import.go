@@ -16,6 +16,7 @@ import (
 
 	pstlib "github.com/mooijtech/go-pst/v6/pkg"
 	pstreader "go.kenn.io/msgvault/internal/pst"
+	"go.kenn.io/msgvault/internal/rederive"
 	"go.kenn.io/msgvault/internal/remoteimage"
 	"go.kenn.io/msgvault/internal/store"
 )
@@ -174,7 +175,7 @@ func importPstWithBatchSize(
 	defer func() {
 		retErr = errors.Join(retErr, execution.Release())
 	}()
-	healDerived(ctx, st, src)
+	rederive.Heal(ctx, slog.Default(), st, src)
 
 	// Set display name to the PST filename so it appears in list-accounts / get_stats.
 	pstBase := filepath.Base(absPath)

@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -232,4 +233,22 @@ func RunIfStale(
 		return nil, false, nil
 	}
 	return total, true, nil
+}
+
+// Heal runs RunIfStale before a sync or import adds more mail and logs a
+// failure instead of returning it. A failed pass records no ledger entry, so
+// it retries on the next sync while this one carries on.
+func Heal(ctx context.Context, logger *slog.Logger, s *store.Store, src *store.Source) {
+	sum, ran, err := RunIfStale(ctx, s, src.SourceType, src.Identifier, src.ID, nil)
+	if err != nil {
+		if ctx.Err() == nil {
+			logger.Warn("re-derive archived messages failed; retrying on the next sync",
+				"source_id", src.ID, "error", err)
+		}
+		return
+	}
+	if ran && sum != nil && sum.MessagesScanned > 0 {
+		logger.Info("re-derived archived messages",
+			"source_id", src.ID, "messages", sum.MessagesScanned, "undecodable", sum.Undecodable)
+	}
 }
