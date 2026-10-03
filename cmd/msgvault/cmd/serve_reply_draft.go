@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json/v2"
@@ -299,7 +300,7 @@ func (a *storeAPIAdapter) selectDraftSender(
 	return candidates[0], selfAddresses, nil
 }
 
-// Source authorization precedes recipient reads; sender and provider checks precede parent MIME and IMAP.
+// Source authorization precedes recipient and fallback MIME reads; sender and provider checks precede remote writes.
 func (a *storeAPIAdapter) resolveDraftTarget(
 	ctx context.Context,
 	parentID *int64,
@@ -353,6 +354,7 @@ func (a *storeAPIAdapter) resolveDraftTarget(
 		return draftReplyTarget{}, "", nil, draftReplyError("invalid_from", fmt.Errorf("list identities for source %d: %w", source.ID, err))
 	}
 	var parentRecipients []store.MessageRecipient
+	var raw []byte
 	if inferReplySender && parentID != nil && requestedFrom == "" {
 		for _, role := range []string{"to", "cc", "bcc"} {
 			recipients, err := a.store.GetMessageRecipientsContext(ctx, *parentID, role)
@@ -360,6 +362,32 @@ func (a *storeAPIAdapter) resolveDraftTarget(
 				return draftReplyTarget{}, "", nil, draftReplyError("invalid_parent", fmt.Errorf("load parent %s recipients: %w", role, err))
 			}
 			parentRecipients = append(parentRecipients, recipients...)
+		}
+		needsRaw := len(parentRecipients) == 0
+		for _, recipient := range parentRecipients {
+			if strings.TrimSpace(recipient.EnvelopeAddress) == "" {
+				needsRaw = true
+				break
+			}
+		}
+		if needsRaw {
+			raw, err = a.store.GetMessageRawContext(ctx, *parentID)
+			if err != nil {
+				return draftReplyTarget{}, "", nil, draftReplyError("invalid_parent", fmt.Errorf("load raw MIME for message %d: %w", *parentID, err))
+			}
+			message, err := mail.ReadMessage(bytes.NewReader(raw))
+			if err != nil {
+				return draftReplyTarget{}, "", nil, draftReplyError("invalid_parent", fmt.Errorf("read parent headers: %w", err))
+			}
+			for _, role := range []string{"To", "Cc"} {
+				addresses, err := message.Header.AddressList(role)
+				if err != nil {
+					continue
+				}
+				for _, address := range addresses {
+					parentRecipients = append(parentRecipients, store.MessageRecipient{EnvelopeAddress: address.Address})
+				}
+			}
 		}
 	}
 	from, selfAddresses, err := a.selectDraftSender(identities, parentRecipients, requestedFrom, grant, source)
@@ -406,9 +434,11 @@ func (a *storeAPIAdapter) resolveDraftTarget(
 		if !store.IsEmailMessageType(parent.MessageType) {
 			return draftReplyTarget{}, "", nil, draftReplyError("invalid_parent", errors.New("parent message is not an email"))
 		}
-		raw, err := a.store.GetMessageRawContext(ctx, parent.ID)
-		if err != nil {
-			return draftReplyTarget{}, "", nil, draftReplyError("invalid_parent", fmt.Errorf("load raw MIME for message %d: %w", parent.ID, err))
+		if raw == nil {
+			raw, err = a.store.GetMessageRawContext(ctx, parent.ID)
+			if err != nil {
+				return draftReplyTarget{}, "", nil, draftReplyError("invalid_parent", fmt.Errorf("load raw MIME for message %d: %w", parent.ID, err))
+			}
 		}
 		target.parent, target.raw = parent, raw
 	}

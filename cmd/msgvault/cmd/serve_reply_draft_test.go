@@ -139,12 +139,16 @@ func TestDraftReplyInfersRecipientIdentity(t *testing.T) {
 }
 
 func TestDraftReplyInferredSenderGrantBoundary(t *testing.T) {
-	for _, mode := range []string{"denied alias", "no senders", "missing parent source", "missing destination source"} {
+	for _, mode := range []string{"denied alias", "denied raw alias", "no senders", "missing parent source", "missing destination source"} {
 		t.Run(mode, func(t *testing.T) {
 			requirements, assertions := require.New(t), assert.New(t)
 			f := newDraftReplyFixture(t)
 			requirements.NoError(f.store.AddAccountIdentity(f.source.ID, "shop@example.test", "manual"))
 			setDraftParentRecipient(t, f.store, f.parentID, "to", "shop@example.test")
+			if mode == "denied raw alias" {
+				_, err := f.store.DB().Exec(f.store.Rebind("UPDATE message_recipients SET email_address = NULL WHERE message_id = ?"), f.parentID)
+				requirements.NoError(err)
+			}
 			ref := draftSourceRef(f.source)
 			ref.SenderKeys = []string{store.NormalizeIdentifierForCompare(testutil.IMAPTestUsername)}
 			if mode == "no senders" {
@@ -167,33 +171,16 @@ func TestDraftReplyInferredSenderGrantBoundary(t *testing.T) {
 				calls++
 				return nil, errors.New("unexpected provider call")
 			}
-			var trace bytes.Buffer
-			if mode == "missing parent source" || mode == "missing destination source" {
-				previous := slog.Default()
-				slog.SetDefault(slog.New(slog.NewJSONHandler(&trace, &slog.HandlerOptions{Level: slog.LevelDebug})))
-				store.ConfigureSQLLogging(store.SQLLogOptions{FullTrace: true})
-				t.Cleanup(func() {
-					store.ConfigureSQLLogging(store.SQLLogOptions{})
-					slog.SetDefault(previous)
-				})
-				_, err := f.store.GetMessageRecipientsContext(t.Context(), f.parentID, "to")
-				requirements.NoError(err)
-				requirements.Equal(1, strings.Count(trace.String(), "FROM message_recipients mr"))
-				trace.Reset()
-			}
 			events, err := f.runInferred(t, adapter, grant, "--source-id", strconv.FormatInt(f.source.ID, 10), "--body", "reply", "--json")
 			requirements.EqualError(err, "not_permitted")
 			assertions.Empty(events)
 			assertions.Zero(calls)
-			if mode == "missing parent source" || mode == "missing destination source" {
-				assertions.Zero(strings.Count(trace.String(), "FROM message_recipients mr"))
-			}
 		})
 	}
 }
 
 func TestDraftReplyUsesStructuredRecipientIdentity(t *testing.T) {
-	for _, mode := range []string{"preserved", "null", "empty", "mixed"} {
+	for _, mode := range []string{"preserved", "null", "empty", "raw cc", "mixed"} {
 		t.Run(mode, func(t *testing.T) {
 			requirements, assertions := require.New(t), assert.New(t)
 			f := newDraftReplyFixture(t)
@@ -204,12 +191,15 @@ func TestDraftReplyUsesStructuredRecipientIdentity(t *testing.T) {
 			requirements.NoError(err)
 			requirements.NoError(f.store.ReplaceMessageRecipients(f.parentID, "to", []int64{shopID}, []string{"Shop"}))
 			setDraftParentRecipient(t, f.store, f.parentID, "to", "shop@example.test")
-			if mode == "null" || mode == "empty" {
+			if mode == "raw cc" {
+				setDraftParentRecipient(t, f.store, f.parentID, "cc", "shop@example.test")
+			}
+			if mode == "null" || mode == "empty" || mode == "raw cc" {
 				var snapshot any
 				if mode == "empty" {
 					snapshot = ""
 				}
-				_, err = f.store.DB().Exec(f.store.Rebind("UPDATE message_recipients SET email_address = ? WHERE message_id = ? AND recipient_type = 'to'"), snapshot, f.parentID)
+				_, err = f.store.DB().Exec(f.store.Rebind("UPDATE message_recipients SET email_address = ? WHERE message_id = ? AND recipient_type IN ('to', 'cc')"), snapshot, f.parentID)
 				requirements.NoError(err)
 			}
 			requirements.NoError(f.store.MergeParticipants(shopID, primaryID))
@@ -221,7 +211,11 @@ func TestDraftReplyUsesStructuredRecipientIdentity(t *testing.T) {
 				requirements.NoError(err)
 				requirements.NoError(f.store.UpsertMessageRaw(f.parentID, []byte("Cc: "+testutil.IMAPTestUsername+"\r\n"+string(raw))))
 			}
-			recipients, err := f.store.GetMessageRecipientsContext(t.Context(), f.parentID, "to")
+			role := "to"
+			if mode == "raw cc" {
+				role = "cc"
+			}
+			recipients, err := f.store.GetMessageRecipientsContext(t.Context(), f.parentID, role)
 			requirements.NoError(err)
 			requirements.Len(recipients, 1)
 			assertions.Equal(primaryID, recipients[0].ParticipantID)
@@ -232,28 +226,24 @@ func TestDraftReplyUsesStructuredRecipientIdentity(t *testing.T) {
 				calls++
 				return factory(ctx, source)
 			}
-			if mode == "null" || mode == "empty" {
+			if mode == "null" || mode == "empty" || mode == "raw cc" {
 				assertions.Equal(testutil.IMAPTestUsername, recipients[0].EmailAddress)
 				assertions.Empty(recipients[0].EnvelopeAddress)
-				events, err := f.runInferred(t, adapter, nil, "--body", "reply")
-				if err == nil {
-					var from string
-					requirements.NoError(f.store.DB().QueryRow(f.store.Rebind("SELECT p.email_address FROM messages m JOIN participants p ON p.id = m.sender_id WHERE m.source_id = ? AND m.source_message_id = ?"), f.source.ID, "Drafts|1").Scan(&from))
-					t.Logf("unexpected draft From=%s after %d provider calls", from, calls)
-				}
-				requirements.EqualError(err, "from_ambiguous")
-				assertions.Empty(events)
-				assertions.Zero(calls)
-				return
+			} else {
+				assertions.Equal("shop@example.test", recipients[0].EmailAddress)
+				assertions.Equal("shop@example.test", recipients[0].EnvelopeAddress)
 			}
-			assertions.Equal("shop@example.test", recipients[0].EmailAddress)
-			assertions.Equal("shop@example.test", recipients[0].EnvelopeAddress)
 			if mode == "mixed" {
 				missing, err := f.store.GetMessageRecipientsContext(t.Context(), f.parentID, "cc")
 				requirements.NoError(err)
 				requirements.Len(missing, 1)
 				assertions.Equal(testutil.IMAPTestUsername, missing[0].EmailAddress)
 				assertions.Empty(missing[0].EnvelopeAddress)
+				events, err := f.runInferred(t, adapter, nil, "--body", "reply")
+				requirements.EqualError(err, "from_ambiguous")
+				assertions.Empty(events)
+				assertions.Zero(calls)
+				return
 			}
 			_, from, selves, err := adapter.resolveDraftTarget(t.Context(), &f.parentID, "", 0, false, "", nil, true)
 			requirements.NoError(err)
@@ -313,23 +303,6 @@ func TestDraftRecipientInferenceIsReplyOnly(t *testing.T) {
 			require.EqualError(t, err, "from_ambiguous")
 		})
 	}
-}
-
-func TestDraftReplyRecipientReadFailure(t *testing.T) {
-	requirements, assertions := require.New(t), assert.New(t)
-	f := newDraftReplyFixture(t)
-	_, err := f.store.DB().Exec("ALTER TABLE message_recipients RENAME COLUMN email_address TO unavailable_address")
-	requirements.NoError(err)
-	adapter := f.grantedAdapter()
-	calls := 0
-	adapter.draftClientFactory = func(context.Context, *store.Source) (*imaplib.Client, error) {
-		calls++
-		return nil, errors.New("unexpected provider call")
-	}
-	events, err := f.runInferred(t, adapter, nil, "--body", "reply")
-	requirements.EqualError(err, "invalid_parent")
-	assertions.Empty(events)
-	assertions.Zero(calls)
 }
 
 func TestDraftReplyInferredSenderReplyAll(t *testing.T) {

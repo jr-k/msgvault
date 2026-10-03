@@ -6,10 +6,6 @@ description: Release history for msgvault
 
 All notable changes to msgvault, grouped by release.
 
-## Unreleased
-
-- Reply drafts automatically use the confirmed alias that received the parent message when its archived recipients identify exactly one destination identity.
-
 ## 0.21.0
 <small>2026-10-02</small>
 
