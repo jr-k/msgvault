@@ -225,7 +225,7 @@ func (w *Worker) deliver(ctx context.Context, claim store.RecordingReferenceClai
 				result.State = "uncertain"
 				result.LastSendAt = &now
 			}
-			if claim.State == "uncertain" {
+			if claim.State == "uncertain" && (result.State != "blocked" || claim.LastSendAt == nil || now.Before(claim.LastSendAt.Add(referenceRequestTimeout+5*time.Minute))) {
 				result.State = "uncertain"
 			}
 		}

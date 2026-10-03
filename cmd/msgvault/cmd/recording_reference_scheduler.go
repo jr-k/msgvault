@@ -17,7 +17,10 @@ import (
 	"go.kenn.io/msgvault/internal/store"
 )
 
-const recordingReferenceJob = "recording-reference-submit"
+const (
+	recordingReferenceJob       = "recording-reference-submit"
+	recordingReferenceGateLabel = "Recording reference submission"
+)
 
 func configureRecordingReferenceJob(ctx context.Context, sched *scheduler.Scheduler, gate api.LabeledOperationGate, st *store.Store, cfg config.DocbankIntegrationConfig, logger *slog.Logger) error {
 	sched.RemoveJob(recordingReferenceJob)
@@ -36,7 +39,7 @@ func configureRecordingReferenceJob(ctx context.Context, sched *scheduler.Schedu
 		return err
 	}
 	var destination string
-	if err := withBeeperMediaGate(ctx, gate, func() error {
+	if err := withBeeperMediaGate(ctx, gate, recordingReferenceGateLabel, func() error {
 		uid, err := st.ArchiveUIDContext(ctx)
 		if err != nil {
 			return err
@@ -47,6 +50,6 @@ func configureRecordingReferenceJob(ctx context.Context, sched *scheduler.Schedu
 	}); err != nil {
 		return err
 	}
-	worker := recordingref.NewWorker(st, client, destination, cfg.ReferenceOrigins, logger).WithOperationGate(beeperMediaGate(gate))
+	worker := recordingref.NewWorker(st, client, destination, cfg.ReferenceOrigins, logger).WithOperationGate(beeperMediaGate(gate, recordingReferenceGateLabel))
 	return sched.AddJob(scheduler.Job{Name: recordingReferenceJob, Schedule: "* * * * *", Run: func(ctx context.Context) error { _, err := worker.RunBatch(ctx); return err }})
 }

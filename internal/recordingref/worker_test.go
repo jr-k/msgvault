@@ -57,7 +57,7 @@ func recordingClient(t *testing.T, handler http.HandlerFunc) *docbankmedia.Clien
 }
 
 func writeReceipt(w http.ResponseWriter, op string) {
-	data, _ := json.Marshal(docbankmedia.Receipt{VaultUID: "vault", SourceID: "source", OperationID: op, OccurrenceID: "occurrence", OperationState: "succeeded", CoverageState: "link_only", Outcome: "retained"})
+	data, _ := json.Marshal(docbankmedia.Receipt{VaultUID: "vault", SourceID: "source", OperationID: op, OccurrenceID: "occurrence", OperationState: "succeeded", CoverageState: "unprocessed", Outcome: "access_required"})
 	_, _ = w.Write(data)
 }
 
@@ -214,6 +214,10 @@ func TestRecordingReferenceDelivery(t *testing.T) {
 			require.NoError(err)
 			state, code, after := recordingState(t, f, id)
 			assert.Equal("retained", state)
+			var outcome, coverage string
+			require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(`SELECT outcome,coverage_state FROM recording_references WHERE message_id=?`), id).Scan(&outcome, &coverage))
+			assert.Equal("access_required", outcome)
+			assert.Equal("unprocessed", coverage)
 			assert.Empty(code)
 			assert.Equal(operation, after)
 			assert.Equal(requests[0], requests[len(requests)-1])
@@ -287,6 +291,10 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 		{"receipt", false, 200, false, "withdrawn", ""},
 		{"recent miss", false, 404, false, "uncertain", "not_found"},
 		{"settled miss", false, 404, true, "withdrawn", "receipt_not_found"},
+		{"recent rejection", true, 422, false, "uncertain", "validation"},
+		{"settled rejection", true, 422, true, "blocked", "validation"},
+		{"settled route missing", true, 404, true, "blocked", "not_found"},
+		{"settled forbidden", true, 403, true, "blocked", "forbidden"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert, require := assert.New(t), require.New(t)
@@ -320,6 +328,10 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 						return
 					}
 					_ = conn.Close()
+					return
+				}
+				if tc.status != http.StatusOK {
+					w.WriteHeader(tc.status)
 					return
 				}
 				writeReceipt(w, req.OperationID)

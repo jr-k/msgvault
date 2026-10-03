@@ -18,6 +18,17 @@ import (
 	"go.kenn.io/msgvault/internal/testutil/storetest"
 )
 
+type recordingReferenceTestGate struct {
+	*api.SerialOperationGate
+
+	labels chan string
+}
+
+func (g *recordingReferenceTestGate) BeginLabeledWorkContext(ctx context.Context, label string) (func(), bool) {
+	g.labels <- label
+	return g.SerialOperationGate.BeginLabeledWorkContext(ctx, label)
+}
+
 func TestRecordingReferenceJob(t *testing.T) {
 	t.Run("consent", func(t *testing.T) {
 		assert, require := assert.New(t), require.New(t)
@@ -49,12 +60,12 @@ func TestRecordingReferenceJob(t *testing.T) {
 			case <-r.Context().Done():
 				return
 			}
-			data, _ := json.Marshal(docbankmedia.Receipt{VaultUID: "vault", SourceID: "source", OperationID: req.OperationID, OccurrenceID: "occurrence", OperationState: "succeeded", CoverageState: "link_only"})
+			data, _ := json.Marshal(docbankmedia.Receipt{VaultUID: "vault", SourceID: "source", OperationID: req.OperationID, OccurrenceID: "occurrence", OperationState: "succeeded", CoverageState: "unprocessed", Outcome: "access_required"})
 			_, _ = w.Write(data)
 		}))
 		defer server.Close()
 		t.Setenv("MSGVAULT_TEST_REFERENCE_KEY", "synthetic-key")
-		gate := api.NewSerialOperationGate()
+		gate := &recordingReferenceTestGate{SerialOperationGate: api.NewSerialOperationGate(), labels: make(chan string, 20)}
 		s := scheduler.New(nil)
 		defer func() { close(release); <-s.Stop().Done() }()
 		require.NoError(configureRecordingReferenceJob(t.Context(), s, gate, f.Store, config.DocbankIntegrationConfig{Enabled: true, ReferenceConsent: true, URL: server.URL, APIKeyEnv: "MSGVAULT_TEST_REFERENCE_KEY"}, nil))
@@ -65,6 +76,10 @@ func TestRecordingReferenceJob(t *testing.T) {
 		case <-arrived:
 		case <-time.After(5 * time.Second):
 			require.FailNow("recording reference request did not arrive")
+		}
+		require.NotEmpty(gate.labels)
+		for len(gate.labels) > 0 {
+			assert.Equal("Recording reference submission", <-gate.labels)
 		}
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()

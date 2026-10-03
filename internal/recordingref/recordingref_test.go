@@ -17,6 +17,7 @@ func TestScan(t *testing.T) {
 	}{
 		{"loom", "See https://WWW.LOOM.COM:443/share/abc?token=secret#fragment.", nil, Loom, 1},
 		{"cap", "https://cap.so/dev/abc", nil, CapCloud, 1},
+		{"cap HTTP", "http://cap.so/s/abc http://www.cap.so/embed/abc", nil, "", 0},
 		{"registered", "https://cap.example.test/s/abc", []string{"https://CAP.EXAMPLE.TEST:443"}, CapSelfHosted, 1},
 		{"unlisted", "https://cap.example.test/s/abc", nil, "", 0},
 		{"lookalike", "https://loom.com.example.test/share/abc", nil, "", 0},

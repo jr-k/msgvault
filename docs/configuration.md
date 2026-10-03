@@ -1047,8 +1047,9 @@ all_sources_upload_consent = true # allow audio from every captured source to le
 
 With `enabled = true` and `reference_consent = true`, the daemon routes Loom,
 Cap and Teams recording links in the background, including existing messages.
-It submits references with acquisition disabled. Docbank reports link-only,
-`unsupported` or `access_required` coverage. Delivery log events include Docbank's
+It submits references with acquisition disabled. Docbank records outcome
+`access_required` or `unsupported`. Coverage stays `unprocessed` until media is imported.
+Delivery log events include Docbank's
 `source_id` and `occurrence_id` for `docbank media import-artifact`.
 
 The former Beeper-only `upload_consent` setting no longer enables uploads.

@@ -114,7 +114,7 @@ func Scan(text string, origins []string) []Ref {
 		switch {
 		case u.Scheme == "https" && (u.Host == "loom.com" || u.Host == "www.loom.com") && (path[1] == "share" || path[1] == "embed"):
 			kind = Loom
-		case (u.Host == "cap.so" || u.Host == "www.cap.so") && path[1] != "share":
+		case u.Scheme == "https" && (u.Host == "cap.so" || u.Host == "www.cap.so") && path[1] != "share":
 			kind = CapCloud
 		case allowed[origin] && path[1] != "share":
 			kind = CapSelfHosted
