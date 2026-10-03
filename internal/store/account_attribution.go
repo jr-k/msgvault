@@ -1179,11 +1179,13 @@ func markDraftAuthoredTx(ctx context.Context, tx *loggedTx, messageID int64) err
 
 // backfillDraftAuthored marks rows a surviving draft record or current draft
 // evidence names as drafts, and returns any of them attributed as inbound to
-// pending so the account-attribution pass re-derives them as written. A draft
+// pending, address included, so neither received: nor account: matches the
+// recipient before the account-attribution pass re-derives them as written. A draft
 // snapshot already retired with its evidence erased cannot be recovered.
 func (s *Store) backfillDraftAuthored(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE messages SET draft_authored = TRUE,
+			account_address = CASE WHEN account_path = '`+accountPathInbound+`' THEN NULL ELSE account_address END,
 			account_path = CASE WHEN account_path = '`+accountPathInbound+`' THEN NULL ELSE account_path END
 		WHERE draft_authored = FALSE AND (
 			id IN (SELECT current_message_id FROM imap_drafts

@@ -936,6 +936,8 @@ func TestBackfillDraftAuthoredFromDraftRecords(t *testing.T) {
 		draft.CurrentMessageID).Scan(&authored, &path))
 	assert.True(authored)
 	assert.False(path.Valid, "a received draft goes back to pending")
+	assert.NotContains(searchIDs(t, st, "account:bob@example.com"), draft.CurrentMessageID,
+		"a pending draft no longer matches its recipient's account")
 	_, err = st.RepairAccountAttributionContext(t.Context(), source.ID, nil)
 	require.NoError(err)
 	assert.NotContains(searchIDs(t, st, "received:bob@example.com"), draft.CurrentMessageID)
