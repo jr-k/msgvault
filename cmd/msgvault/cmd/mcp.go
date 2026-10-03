@@ -123,16 +123,22 @@ func runDelegatedMCP(cmd *cobra.Command) error {
 		return fmt.Errorf("open daemon: %w", err)
 	}
 	defer func() { _ = st.Close() }()
-	var commands []string
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
+	// Draft tools are the only delegated tools, so serving without them would look like an empty msgvault.
 	health, err := st.Health(ctx)
-	if err == nil && health != nil && health.APISchemaVersion != nil &&
-		daemonclient.APISchemaVersionAtLeast(*health.APISchemaVersion, draftsMinAPISchemaVersion) {
-		commands = mcpDraftCommands(true)
+	if err != nil {
+		return fmt.Errorf("check daemon compatibility: %w", err)
+	}
+	var schemaVersion string
+	if health != nil && health.APISchemaVersion != nil {
+		schemaVersion = *health.APISchemaVersion
+	}
+	if !daemonclient.APISchemaVersionAtLeast(schemaVersion, draftsMinAPISchemaVersion) {
+		return fmt.Errorf("MCP draft tools require daemon API schema %s or newer (daemon reports %q); upgrade the daemon", draftsMinAPISchemaVersion, schemaVersion)
 	}
 	return serveMCPStdioWithOptions(ctx, mcpserver.ServeOptions{
-		Drafts: daemonMCPDraftRunner{client: st}, DraftCommands: commands, DraftToolsOnly: true,
+		Drafts: daemonMCPDraftRunner{client: st}, DraftCommands: mcpDraftCommands(true), DraftToolsOnly: true,
 	})
 }
 
