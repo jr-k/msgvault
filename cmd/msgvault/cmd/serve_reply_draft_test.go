@@ -143,6 +143,7 @@ func TestDraftReplyInferredSenderGrantBoundary(t *testing.T) {
 				ref.SenderKeys = nil
 			}
 			if mode == "missing parent source" {
+				ref.SenderKeys = []string{"shop@example.test"}
 				other, err := f.store.GetOrCreateSource("mbox", "imported@example.test")
 				requirements.NoError(err)
 				_, err = f.store.DB().Exec(f.store.Rebind("UPDATE messages SET source_id = ? WHERE id = ?"), other.ID, f.parentID)
