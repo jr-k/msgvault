@@ -245,7 +245,15 @@ func TestDraftReplyInferredSenderReplyAll(t *testing.T) {
 	raw, err := f.store.GetMessageRaw(f.parentID)
 	requirements.NoError(err)
 	requirements.NoError(f.store.UpsertMessageRaw(f.parentID, []byte("Cc: "+testutil.IMAPTestUsername+", copy@example.test\r\n"+string(raw))))
-	_, err = f.runInferred(t, f.grantedAdapter(), nil, "--all", "--body", "reply")
+	primaryID, err := f.store.EnsureParticipant(testutil.IMAPTestUsername, "", "")
+	requirements.NoError(err)
+	copyID, err := f.store.EnsureParticipant("copy@example.test", "", "")
+	requirements.NoError(err)
+	requirements.NoError(f.store.ReplaceMessageRecipients(f.parentID, "cc", []int64{primaryID, copyID}, []string{"", ""}))
+	ref := draftSourceRef(f.source)
+	ref.SenderKeys = []string{"shop@example.test"}
+	grant := &agentgrant.Grant{Permissions: []agentgrant.Permission{agentgrant.PermissionDraftCreate}, Sources: []agentgrant.SourceRef{ref}}
+	_, err = f.runInferred(t, f.grantedAdapter(), grant, "--all", "--body", "reply")
 	requirements.NoError(err)
 	var id int64
 	requirements.NoError(f.store.DB().QueryRow(f.store.Rebind("SELECT id FROM messages WHERE source_id = ? AND source_message_id = ?"), f.source.ID, "Drafts|1").Scan(&id))
