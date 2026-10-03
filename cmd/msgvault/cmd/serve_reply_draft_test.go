@@ -42,6 +42,7 @@ func TestDraftSenderRecipientSelection(t *testing.T) {
 	for _, tc := range []struct {
 		name, requested, want, code string
 		recipients                  []string
+		fallbackOnly                bool
 		grantSenders                []string
 	}{
 		{name: "unique", recipients: []string{"shop@example.test"}, want: "<shop@example.test>"},
@@ -50,6 +51,9 @@ func TestDraftSenderRecipientSelection(t *testing.T) {
 		{name: "two matches one granted", recipients: []string{"shop@example.test", "primary@example.test"}, grantSenders: []string{"primary@example.test"}, want: "<primary@example.test>"},
 		{name: "two matches none granted", recipients: []string{"shop@example.test", "primary@example.test"}, grantSenders: []string{"other@example.test"}, code: "not_permitted"},
 		{name: "no match", recipients: []string{"other@example.test", "unconfirmed@example.test", "malformed"}, code: "from_ambiguous"},
+		{name: "fallback only", recipients: []string{"primary@example.test"}, fallbackOnly: true, code: "from_ambiguous"},
+		{name: "unusable snapshot", recipients: []string{"", "   ", "malformed"}, code: "from_ambiguous"},
+		{name: "explicit without snapshot", requested: "primary@example.test", recipients: []string{"shop@example.test"}, fallbackOnly: true, want: "<primary@example.test>"},
 		{name: "explicit", requested: `"Example, Owner" <primary@example.test>`, recipients: []string{"shop@example.test"}, want: `"Example, Owner" <primary@example.test>`},
 		{name: "malformed explicit", requested: "broken", recipients: []string{"shop@example.test"}, code: "invalid_from"},
 		{name: "unconfirmed explicit", requested: "unconfirmed@example.test", code: "invalid_from"},
@@ -58,7 +62,11 @@ func TestDraftSenderRecipientSelection(t *testing.T) {
 			requirements, assertions := require.New(t), assert.New(t)
 			recipients := make([]store.MessageRecipient, 0, len(tc.recipients))
 			for _, address := range tc.recipients {
-				recipients = append(recipients, store.MessageRecipient{EmailAddress: address})
+				recipient := store.MessageRecipient{EmailAddress: address}
+				if !tc.fallbackOnly {
+					recipient.EnvelopeAddress = address
+				}
+				recipients = append(recipients, recipient)
 			}
 			var grant *agentgrant.Grant
 			if tc.grantSenders != nil {
@@ -131,7 +139,7 @@ func TestDraftReplyInfersRecipientIdentity(t *testing.T) {
 }
 
 func TestDraftReplyInferredSenderGrantBoundary(t *testing.T) {
-	for _, mode := range []string{"denied alias", "no senders", "missing parent source"} {
+	for _, mode := range []string{"denied alias", "no senders", "missing parent source", "missing destination source"} {
 		t.Run(mode, func(t *testing.T) {
 			requirements, assertions := require.New(t), assert.New(t)
 			f := newDraftReplyFixture(t)
@@ -142,12 +150,15 @@ func TestDraftReplyInferredSenderGrantBoundary(t *testing.T) {
 			if mode == "no senders" {
 				ref.SenderKeys = nil
 			}
-			if mode == "missing parent source" {
+			if mode == "missing parent source" || mode == "missing destination source" {
 				ref.SenderKeys = []string{"shop@example.test"}
 				other, err := f.store.GetOrCreateSource("mbox", "imported@example.test")
 				requirements.NoError(err)
 				_, err = f.store.DB().Exec(f.store.Rebind("UPDATE messages SET source_id = ? WHERE id = ?"), other.ID, f.parentID)
 				requirements.NoError(err)
+				if mode == "missing destination source" {
+					ref = draftSourceRef(other)
+				}
 			}
 			grant := &agentgrant.Grant{Permissions: []agentgrant.Permission{agentgrant.PermissionDraftCreate}, Sources: []agentgrant.SourceRef{ref}}
 			adapter := f.grantedAdapter()
@@ -156,25 +167,108 @@ func TestDraftReplyInferredSenderGrantBoundary(t *testing.T) {
 				calls++
 				return nil, errors.New("unexpected provider call")
 			}
+			var trace bytes.Buffer
+			if mode == "missing parent source" || mode == "missing destination source" {
+				previous := slog.Default()
+				slog.SetDefault(slog.New(slog.NewJSONHandler(&trace, &slog.HandlerOptions{Level: slog.LevelDebug})))
+				store.ConfigureSQLLogging(store.SQLLogOptions{FullTrace: true})
+				t.Cleanup(func() {
+					store.ConfigureSQLLogging(store.SQLLogOptions{})
+					slog.SetDefault(previous)
+				})
+				_, err := f.store.GetMessageRecipientsContext(t.Context(), f.parentID, "to")
+				requirements.NoError(err)
+				requirements.Equal(1, strings.Count(trace.String(), "FROM message_recipients mr"))
+				trace.Reset()
+			}
 			events, err := f.runInferred(t, adapter, grant, "--source-id", strconv.FormatInt(f.source.ID, 10), "--body", "reply", "--json")
 			requirements.EqualError(err, "not_permitted")
 			assertions.Empty(events)
 			assertions.Zero(calls)
+			if mode == "missing parent source" || mode == "missing destination source" {
+				assertions.Zero(strings.Count(trace.String(), "FROM message_recipients mr"))
+			}
 		})
 	}
 }
 
 func TestDraftReplyUsesStructuredRecipientIdentity(t *testing.T) {
-	requirements, assertions := require.New(t), assert.New(t)
-	f := newDraftReplyFixture(t)
-	requirements.NoError(f.store.AddAccountIdentity(f.source.ID, "shop@example.test", "manual"))
-	setDraftParentRecipient(t, f.store, f.parentID, "to", "shop@example.test")
-	for _, label := range []string{"Original Owner", "Renamed Owner"} {
-		_, err := f.store.DB().Exec(f.store.Rebind("UPDATE participants SET email_address = ?, display_name = ? WHERE id IN (SELECT participant_id FROM message_recipients WHERE message_id = ? AND recipient_type = 'to')"), "unrelated@example.test", label, f.parentID)
-		requirements.NoError(err)
-		_, from, _, err := f.grantedAdapter().resolveDraftTarget(t.Context(), &f.parentID, "", 0, false, "", nil, true)
-		requirements.NoError(err)
-		assertions.Equal("<shop@example.test>", from)
+	for _, mode := range []string{"preserved", "null", "empty", "mixed"} {
+		t.Run(mode, func(t *testing.T) {
+			requirements, assertions := require.New(t), assert.New(t)
+			f := newDraftReplyFixture(t)
+			requirements.NoError(f.store.AddAccountIdentity(f.source.ID, "shop@example.test", "manual"))
+			shopID, err := f.store.EnsureParticipant("shop@example.test", "Shop", "")
+			requirements.NoError(err)
+			primaryID, err := f.store.EnsureParticipant(testutil.IMAPTestUsername, "", "")
+			requirements.NoError(err)
+			requirements.NoError(f.store.ReplaceMessageRecipients(f.parentID, "to", []int64{shopID}, []string{"Shop"}))
+			setDraftParentRecipient(t, f.store, f.parentID, "to", "shop@example.test")
+			if mode == "null" || mode == "empty" {
+				var snapshot any
+				if mode == "empty" {
+					snapshot = ""
+				}
+				_, err = f.store.DB().Exec(f.store.Rebind("UPDATE message_recipients SET email_address = ? WHERE message_id = ? AND recipient_type = 'to'"), snapshot, f.parentID)
+				requirements.NoError(err)
+			}
+			requirements.NoError(f.store.MergeParticipants(shopID, primaryID))
+			if mode == "mixed" {
+				requirements.NoError(f.store.ReplaceMessageRecipients(f.parentID, "cc", []int64{primaryID}, []string{""}))
+				_, err = f.store.DB().Exec(f.store.Rebind("UPDATE message_recipients SET email_address = NULL WHERE message_id = ? AND recipient_type = 'cc'"), f.parentID)
+				requirements.NoError(err)
+				raw, err := f.store.GetMessageRaw(f.parentID)
+				requirements.NoError(err)
+				requirements.NoError(f.store.UpsertMessageRaw(f.parentID, []byte("Cc: "+testutil.IMAPTestUsername+"\r\n"+string(raw))))
+			}
+			recipients, err := f.store.GetMessageRecipientsContext(t.Context(), f.parentID, "to")
+			requirements.NoError(err)
+			requirements.Len(recipients, 1)
+			assertions.Equal(primaryID, recipients[0].ParticipantID)
+			adapter := f.grantedAdapter()
+			calls := 0
+			factory := adapter.draftClientFactory
+			adapter.draftClientFactory = func(ctx context.Context, source *store.Source) (*imaplib.Client, error) {
+				calls++
+				return factory(ctx, source)
+			}
+			if mode == "null" || mode == "empty" {
+				assertions.Equal(testutil.IMAPTestUsername, recipients[0].EmailAddress)
+				assertions.Empty(recipients[0].EnvelopeAddress)
+				events, err := f.runInferred(t, adapter, nil, "--body", "reply")
+				if err == nil {
+					var from string
+					requirements.NoError(f.store.DB().QueryRow(f.store.Rebind("SELECT p.email_address FROM messages m JOIN participants p ON p.id = m.sender_id WHERE m.source_id = ? AND m.source_message_id = ?"), f.source.ID, "Drafts|1").Scan(&from))
+					t.Logf("unexpected draft From=%s after %d provider calls", from, calls)
+				}
+				requirements.EqualError(err, "from_ambiguous")
+				assertions.Empty(events)
+				assertions.Zero(calls)
+				return
+			}
+			assertions.Equal("shop@example.test", recipients[0].EmailAddress)
+			assertions.Equal("shop@example.test", recipients[0].EnvelopeAddress)
+			if mode == "mixed" {
+				missing, err := f.store.GetMessageRecipientsContext(t.Context(), f.parentID, "cc")
+				requirements.NoError(err)
+				requirements.Len(missing, 1)
+				assertions.Equal(testutil.IMAPTestUsername, missing[0].EmailAddress)
+				assertions.Empty(missing[0].EnvelopeAddress)
+			}
+			_, from, selves, err := adapter.resolveDraftTarget(t.Context(), &f.parentID, "", 0, false, "", nil, true)
+			requirements.NoError(err)
+			assertions.Equal("<shop@example.test>", from)
+			assertions.ElementsMatch([]string{testutil.IMAPTestUsername, "shop@example.test"}, selves)
+			_, err = f.runInferred(t, adapter, nil, "--body", "reply")
+			requirements.NoError(err)
+			var id int64
+			requirements.NoError(f.store.DB().QueryRow(f.store.Rebind("SELECT id FROM messages WHERE source_id = ? AND source_message_id = ?"), f.source.ID, "Drafts|1").Scan(&id))
+			raw, err := f.store.GetMessageRaw(id)
+			requirements.NoError(err)
+			message, err := mail.ReadMessage(bytes.NewReader(raw))
+			requirements.NoError(err)
+			assertions.Equal("<shop@example.test>", message.Header.Get("From"))
+		})
 	}
 }
 

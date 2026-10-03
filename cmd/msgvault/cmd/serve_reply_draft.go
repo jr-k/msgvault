@@ -239,7 +239,7 @@ func (a *storeAPIAdapter) selectDraftSender(
 	if requested == "" {
 		matches := make(map[string]string)
 		for _, recipient := range parentRecipients {
-			_, key, err := parseDraftSender(recipient.EmailAddress)
+			_, key, err := parseDraftSender(recipient.EnvelopeAddress)
 			if err != nil {
 				continue
 			}
