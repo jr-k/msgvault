@@ -457,8 +457,8 @@ func (s *Store) refreshAccountAttributionTx(
 		return malformed, fmt.Errorf("read outbound evidence for message %d: %w", id, err)
 	}
 	if draft && !authored {
-		if _, err := tx.ExecContext(ctx, `UPDATE messages SET draft_authored = TRUE WHERE id = ?`, id); err != nil {
-			return malformed, fmt.Errorf("record draft authorship of message %d: %w", id, err)
+		if err := markDraftAuthoredTx(ctx, tx, id); err != nil {
+			return malformed, err
 		}
 	}
 
@@ -740,6 +740,9 @@ func (s *Store) refreshAccountAttributionIfOutboundChangedTx(
 	if err := mutate(); err != nil {
 		return err
 	}
+	if err := markDraftAuthoredTx(ctx, tx, messageID); err != nil {
+		return err
+	}
 	var path sql.NullString
 	var outbound bool
 	err := tx.QueryRowContext(ctx, `
@@ -767,15 +770,22 @@ type labelOutboundFlips struct {
 	ctx      context.Context
 	tx       *loggedTx
 	sourceID int64
-	before   map[int64]bool
+	before   map[int64]string
 }
 
 func newLabelOutboundFlips(ctx context.Context, tx *loggedTx, sourceID int64) *labelOutboundFlips {
 	return &labelOutboundFlips{ctx: ctx, tx: tx, sourceID: sourceID}
 }
 
+// outboundEvidenceByLabelQuery reads each label's evidence as empty (none),
+// 'sent' or 'draft'. A Sent label that becomes a Drafts label keeps members
+// written but must still record their draft authorship, so it counts as a
+// change too.
 func outboundEvidenceByLabelQuery(where string) string {
-	return `SELECT l.id, COALESCE(` + outboundEvidenceLabelSQL("l", "src") + `, FALSE)
+	return `SELECT l.id, CASE
+			WHEN l.system_role = '` + LabelSystemRoleDrafts + `' OR (src.source_type = 'gmail' AND l.source_label_id = 'DRAFT') THEN 'draft'
+			WHEN COALESCE(` + outboundEvidenceLabelSQL("l", "src") + `, FALSE) THEN 'sent'
+			ELSE '' END
 		FROM labels l JOIN sources src ON src.id = l.source_id
 		WHERE l.source_id = ? AND ` + where
 }
@@ -788,7 +798,7 @@ func (f *labelOutboundFlips) captureLabels(sourceLabelIDs, names []string) error
 		return nil
 	}
 	if f.before == nil {
-		f.before = make(map[int64]bool)
+		f.before = make(map[int64]string)
 	}
 	keys := append(slices.Clone(sourceLabelIDs), names...)
 	for start := 0; start < len(keys); start += 400 {
@@ -808,7 +818,7 @@ func (f *labelOutboundFlips) captureLabels(sourceLabelIDs, names []string) error
 		}
 		for rows.Next() {
 			var id int64
-			var sent bool
+			var sent string
 			if err := rows.Scan(&id, &sent); err != nil {
 				_ = rows.Close()
 				return fmt.Errorf("scan label outbound evidence: %w", err)
@@ -840,11 +850,11 @@ func (s *Store) applyLabelOutboundFlipsTx(f *labelOutboundFlips) error {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
-	after := make(map[int64]bool, len(ids))
+	after := make(map[int64]string, len(ids))
 	err := queryInChunksContext(ctx, tx, ids, []any{f.sourceID},
 		outboundEvidenceByLabelQuery("l.id IN (%s)"), func(rows *loggedRows) error {
 			var id int64
-			var sent bool
+			var sent string
 			if err := rows.Scan(&id, &sent); err != nil {
 				return fmt.Errorf("scan label outbound evidence: %w", err)
 			}
@@ -1150,6 +1160,21 @@ func (s *Store) RepairAccountAttributionContext(
 			progress(summary)
 		}
 	}
+}
+
+// markDraftAuthoredTx records draft authorship when the message has draft
+// evidence now. It runs after any label or membership change, including ones
+// that leave the message's direction unchanged, so the bit is set before a
+// later change can retire the draft and its evidence.
+func markDraftAuthoredTx(ctx context.Context, tx *loggedTx, messageID int64) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE messages SET draft_authored = TRUE
+		WHERE id = ? AND draft_authored = FALSE
+		  AND EXISTS (SELECT 1 FROM sources src WHERE src.id = messages.source_id
+		              AND `+draftEvidenceSQL("messages", "src")+`)`, messageID); err != nil {
+		return fmt.Errorf("record draft authorship of message %d: %w", messageID, err)
+	}
+	return nil
 }
 
 // backfillDraftAuthored marks rows a surviving draft record or current draft

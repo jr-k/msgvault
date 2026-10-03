@@ -940,3 +940,59 @@ func TestBackfillDraftAuthoredFromDraftRecords(t *testing.T) {
 	require.NoError(err)
 	assert.NotContains(searchIDs(t, st, "received:bob@example.com"), draft.CurrentMessageID)
 }
+
+func TestDraftAuthorshipRecordedWithoutDirectionChange(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	f := newAttrFixture(t, "imap", "imaps://"+strings.Replace(attrSink, "@", "%40", 1)+"@mail.example.net:993")
+	f.confirm(attrSink, "friend@example.com")
+	_, err := f.st.EnsureLabelsBatch(f.source.ID, map[string]store.LabelInfo{
+		"Sent": {Name: "Sent", Type: "system", SystemRole: store.LabelSystemRoleSent},
+	})
+	require.NoError(err)
+	id := f.persist(attrMail{raw: "From: " + attrSink + "\r\nTo: friend@example.com\r\n\r\nbody",
+		from: []string{attrSink}, to: []string{"friend@example.com"}, sourceMsgKey: "copy-1"})
+	state := func(mailbox string, next uint32) store.IMAPFolderState {
+		return store.IMAPFolderState{Mailbox: mailbox, UIDValidity: 7, UIDNext: next}
+	}
+	// Already written through Sent, the row gains a \Draft copy, so its
+	// direction does not change.
+	require.NoError(f.st.ApplyIMAPMailboxDeltas(f.source.ID, []store.IMAPMailboxDelta{
+		{Mailbox: "Sent", State: state("Sent", 2), Memberships: []store.IMAPMembershipObservation{
+			{Mailbox: "Sent", UIDValidity: 7, UID: 1, SourceMessageID: "copy-1"}}},
+	}))
+	_, path := attribution(t, f.st, id)
+	require.Equal("sent", path.String)
+	require.NoError(f.st.ApplyIMAPMailboxDeltas(f.source.ID, []store.IMAPMailboxDelta{
+		{Mailbox: "Sent", State: state("Sent", 2)},
+		{Mailbox: "Scratch", State: state("Scratch", 2), Memberships: []store.IMAPMembershipObservation{
+			{Mailbox: "Scratch", UIDValidity: 7, UID: 1, SourceMessageID: "copy-1", Flags: []string{"\\Draft"}}}},
+	}))
+	require.NoError(f.st.ApplyIMAPMailboxDeltas(f.source.ID, []store.IMAPMailboxDelta{
+		{Mailbox: "Sent", State: state("Sent", 3), VanishedUIDs: []uint32{1}},
+		{Mailbox: "Scratch", State: state("Scratch", 3), VanishedUIDs: []uint32{1}},
+	}))
+	var address sql.NullString
+	address, path = attribution(t, f.st, id)
+	assert.Equal("sent", path.String, "a draft stays written after its evidence is gone")
+	assert.Equal(attrSink, address.String)
+
+	// A Sent label that becomes a Drafts label records authorship too.
+	m := newAttrFixtureOn(t, f.st, "mbox", "relabel@example.net")
+	m.confirm("relabel@example.net", "friend@example.com")
+	labels, err := f.st.EnsureLabelsBatch(m.source.ID, map[string]store.LabelInfo{
+		"Out": {Name: "Out", Type: "system", SystemRole: store.LabelSystemRoleSent},
+	})
+	require.NoError(err)
+	mid := m.persist(attrMail{raw: "From: relabel@example.net\r\nTo: friend@example.com\r\n\r\nbody",
+		from: []string{"relabel@example.net"}, to: []string{"friend@example.com"}, labels: []int64{labels["Out"]}})
+	for _, role := range []string{store.LabelSystemRoleDrafts, ""} {
+		_, err = f.st.EnsureLabelsBatch(m.source.ID, map[string]store.LabelInfo{
+			"Out": {Name: "Out", Type: "system", SystemRole: role},
+		})
+		require.NoError(err)
+	}
+	_, path = attribution(t, f.st, mid)
+	assert.Equal("sent", path.String)
+	assert.NotContains(searchIDs(t, f.st, "received:friend@example.com"), mid)
+}
