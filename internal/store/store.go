@@ -1023,6 +1023,8 @@ func (s *Store) runMaintenance(ctx context.Context, fn func(ctx context.Context,
 	return nil
 }
 
+const messagesAccountIndexDefinition = "ON messages(account_address, account_path)"
+
 // buildLargeIndexesConcurrently creates big-table indexes without blocking
 // writers. CREATE INDEX CONCURRENTLY cannot run inside a transaction (unlike
 // the runMaintenance escape hatch, which only disables the pool-wide
@@ -1082,6 +1084,7 @@ func (s *Store) buildLargeIndexesConcurrently(ctx context.Context) {
 	concurrentIndexes := []struct{ name, definition string }{
 		{"idx_messages_source_id", "ON messages(source_id, id)"},
 		{"idx_messages_reply_to_message_id", "ON messages(reply_to_message_id) WHERE reply_to_message_id IS NOT NULL"},
+		{"idx_messages_account", messagesAccountIndexDefinition},
 		{rfc822CanonicalIndexName, s.dialect.RFC822CanonicalIDIndexDefinition()},
 		{"idx_participants_email_lower", "ON participants(LOWER(email_address))"},
 		{"idx_participant_identifiers_value_lower", "ON participant_identifiers(LOWER(identifier_value))"},
@@ -1570,12 +1573,13 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 		}
 	}
 	// account: and received: filter on these; created here because the
-	// columns arrive through the legacy migrations above.
-	if _, err := s.db.ExecContext(ctx, `
-		CREATE INDEX IF NOT EXISTS idx_messages_account
-		ON messages(account_address, account_path)
-	`); err != nil {
-		return fmt.Errorf("create message account index: %w", err)
+	// columns arrive through the legacy migrations above. PostgreSQL builds
+	// it concurrently in buildLargeIndexesConcurrently.
+	if !s.IsPostgreSQL() {
+		if _, err := s.db.ExecContext(ctx,
+			`CREATE INDEX IF NOT EXISTS idx_messages_account `+messagesAccountIndexDefinition); err != nil {
+			return fmt.Errorf("create message account index: %w", err)
+		}
 	}
 	if err := s.runOnceMigration(ctx, migrationCardDAVMultipleAccounts, 1, false, s.ensureCardDAVMultiAccountSchema); err != nil {
 		return fmt.Errorf("migrate CardDAV connections: %w", err)
