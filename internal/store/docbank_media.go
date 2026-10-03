@@ -54,7 +54,6 @@ const (
 )
 
 // attachmentBytesArchived matches attachment a when its bytes are in the archive.
-// Rows written before attachment_state existed count as stored only when it holds.
 const attachmentBytesArchived = `(length(COALESCE(a.content_hash, '')) = 64
 	  AND COALESCE(a.size, 0) > 0
 	  AND COALESCE(a.storage_path, '') <> '')`
@@ -67,7 +66,7 @@ const beeperMediaEligible = attachmentBytesArchived + `
 	  AND COALESCE(m.source_message_id, '') <> ''
 	  AND (
 		(src.source_type = 'beeper'
-		  AND COALESCE(a.attachment_state, '') IN ('', 'stored')
+		  AND COALESCE(a.attachment_state, '') = 'stored'
 		  AND COALESCE(a.media_type, '') IN ('audio', 'voice_note')
 		  AND COALESCE(a.attachment_role, 'unknown') = 'standalone')
 		OR (src.source_type <> 'beeper'
@@ -602,7 +601,12 @@ type MessageMediaOccurrence struct {
 const messageAudioHint = `(COALESCE(a.media_type, '') IN ('audio', 'voice_note')
 	OR LOWER(COALESCE(a.mime_type, '')) LIKE 'audio/%'
 	OR LOWER(COALESCE(a.filename, '')) LIKE '%.wav'
-	OR LOWER(COALESCE(a.filename, '')) LIKE '%.mp3')`
+	OR LOWER(COALESCE(a.filename, '')) LIKE '%.mp3'
+	OR LOWER(COALESCE(a.filename, '')) LIKE '%.m4a'
+	OR LOWER(COALESCE(a.filename, '')) LIKE '%.aac'
+	OR LOWER(COALESCE(a.filename, '')) LIKE '%.ogg'
+	OR LOWER(COALESCE(a.filename, '')) LIKE '%.oga'
+	OR LOWER(COALESCE(a.filename, '')) LIKE '%.opus')`
 
 // ListMessageMediaOccurrences returns the message's current, non-revoked
 // recordings for destination. It only reads; stale mappings stay as they are
