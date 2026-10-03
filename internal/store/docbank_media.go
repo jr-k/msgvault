@@ -653,7 +653,7 @@ func (s *Store) ListMessageMediaOccurrences(
 		FROM attachments a
 		JOIN messages m ON m.id = a.message_id
 		WHERE m.id = ? AND `+LiveMessagesWhere("m", true)+`
-		  AND COALESCE(a.media_type, '') IN ('audio', 'voice_note')
+		  AND `+messageAudioHint+`
 		  AND (COALESCE(a.attachment_state, '') IN ('pending', 'skipped', 'failed', 'unavailable')
 		    OR (COALESCE(a.attachment_state, '') = '' AND NOT `+attachmentBytesArchived+`))
 		ORDER BY a.id`), messageID)

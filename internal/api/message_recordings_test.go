@@ -350,13 +350,20 @@ func TestMessageRecordingsStates(t *testing.T) {
 			SourcePartKey: "beeper:photo", MediaType: "image", State: attachmentpolicy.StateSkipped,
 			SkipReason: attachmentpolicy.SkipSizeCap, Role: store.AttachmentRoleStandalone,
 			RoleSource: store.AttachmentRoleSourceImporterSemantics},
+		// Slack leaves media_type empty on files it never downloaded.
+		{Filename: "clip.mp3", MIMEType: "audio/mpeg", Size: 20, SourceAttachmentID: "slack:clip",
+			SourcePartKey: "slack:clip", State: attachmentpolicy.StateFailed,
+			SkipReason: attachmentpolicy.SkipFetchFailure, Role: store.AttachmentRoleStandalone,
+			RoleSource: store.AttachmentRoleSourceImporterSemantics},
 	} {
 		require.NoError(rf.f.Store.UpsertAttachmentRecord(t.Context(), uncapturedMessage, write))
 	}
 	recordings = recordingsFor(t, srv, uncapturedMessage)
-	require.Len(recordings, 1)
+	require.Len(recordings, 2)
 	assert.Equal("late.ogg", recordings[0].Filename)
 	assert.Equal("media_missing", recordings[0].State)
+	assert.Equal("clip.mp3", recordings[1].Filename)
+	assert.Equal("media_missing", recordings[1].State)
 	assert.Equal(before, rf.docbank.requestCount())
 
 	// One recording's Docbank failure never hides another.
