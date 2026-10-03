@@ -1,0 +1,265 @@
+package recordingref
+
+import (
+	"context"
+	"encoding/json/v2"
+	"errors"
+	"log/slog"
+	"slices"
+	"strings"
+	"time"
+
+	"go.kenn.io/msgvault/internal/docbankmedia"
+	"go.kenn.io/msgvault/internal/store"
+)
+
+const referenceRequestTimeout = 30 * time.Second
+
+type Worker struct {
+	st          *store.Store
+	client      *docbankmedia.Client
+	destination string
+	origins     []string
+	logger      *slog.Logger
+	gate        func(context.Context) (func(), bool)
+}
+
+type Result struct{ Examined, Pages, Delivered int }
+
+func NewWorker(st *store.Store, client *docbankmedia.Client, destination string, origins []string, logger *slog.Logger) *Worker {
+	canonical := make([]string, 0, len(origins))
+	for _, raw := range origins {
+		if origin, err := CanonicalOrigin(raw); err == nil {
+			canonical = append(canonical, origin)
+		}
+	}
+	slices.Sort(canonical)
+	return &Worker{st: st, client: client, destination: destination, origins: slices.Compact(canonical), logger: logger}
+}
+
+func (w *Worker) WithOperationGate(gate func(context.Context) (func(), bool)) *Worker {
+	w.gate = gate
+	return w
+}
+
+func (w *Worker) gated(ctx context.Context, fn func() error) error {
+	if w.gate != nil {
+		release, ok := w.gate(ctx)
+		if !ok {
+			return errors.New("recording reference operation gate unavailable")
+		}
+		defer release()
+	}
+	return fn()
+}
+
+func messageRefs(m store.RecordingMessage, origins []string) []Ref {
+	refs := Scan(m.Body, origins)
+	seen := make(map[string]bool)
+	for _, r := range refs {
+		seen[r.RouteKey] = true
+	}
+	for _, p := range m.Pointers {
+		if r, ok := TeamsPointer(p.ID, p.Path); ok && !seen[r.RouteKey] {
+			refs = append(refs, r)
+			seen[r.RouteKey] = true
+		}
+	}
+	return refs
+}
+
+func referenceInputs(m store.RecordingMessage, refs []Ref) ([]store.RecordingReferenceInput, error) {
+	inputs := make([]store.RecordingReferenceInput, 0, len(refs))
+	for _, r := range refs {
+		sent := ""
+		occ := docbankmedia.Occurrence{Ref: "msgvault:" + digest(strings.Join([]string{m.ArchiveUID, m.SourceType, m.SourceIdentifier, m.SourceMessageID, r.RouteKey}, "\x00"))}
+		if m.SentAt != nil {
+			sent = m.SentAt.UTC().Format(time.RFC3339Nano)
+			occ.Message = docbankmedia.Timestamp{Normalized: sent, Raw: sent, Precision: "instant", Timezone: "UTC"}
+		}
+		occ.Revision = digest(r.ReferenceSHA256() + "\x00" + sent)
+		encoded, err := json.Marshal(occ)
+		if err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, store.RecordingReferenceInput{RouteKey: r.RouteKey, Kind: string(r.Kind), Origin: r.Origin, RefSHA256: r.ReferenceSHA256(), OccurrenceJSON: string(encoded)})
+	}
+	return inputs, nil
+}
+
+func (w *Worker) reconcile(ctx context.Context, m store.RecordingMessage) error {
+	inputs, err := referenceInputs(m, messageRefs(m, w.origins))
+	if err != nil {
+		return err
+	}
+	return w.st.ReconcileRecordingReferences(ctx, w.destination, m.ID, m.Live, inputs)
+}
+
+func (w *Worker) RunBatch(ctx context.Context) (Result, error) {
+	var result Result
+	start := time.Now()
+	policy := digest(strings.Join(w.origins, "\x00"))
+	for result.Pages < 50 && time.Since(start) < 20*time.Second {
+		more := false
+		err := w.gated(ctx, func() error {
+			before, err := w.st.LoadRecordingReferenceCursor(ctx, w.destination)
+			if err != nil {
+				return err
+			}
+			cursor := before
+			if cursor.Policy != policy {
+				cursor = store.RecordingReferenceCursor{Policy: policy}
+			}
+			page, err := w.st.ListChangedMessages(ctx, cursor.FeedCursor(), 200)
+			if err != nil {
+				return err
+			}
+			for _, changed := range page.Messages {
+				m, exists, err := w.st.ReadRecordingMessage(ctx, changed.ID)
+				if err != nil {
+					return err
+				}
+				if exists {
+					if err := w.reconcile(ctx, m); err != nil {
+						return err
+					}
+				}
+				result.Examined++
+				cursor.At, cursor.AfterID, cursor.AfterRow = changed.ContentChangedAt, changed.ID, true
+			}
+			more = len(page.Messages) == 200
+			if !more && !page.CompleteThrough.IsZero() {
+				cursor.At, cursor.AfterID, cursor.AfterRow = page.CompleteThrough, 0, false
+			}
+			swapped, err := w.st.AdvanceRecordingReferenceCursor(ctx, w.destination, before, cursor)
+			if err != nil {
+				return err
+			}
+			if !swapped {
+				more = false
+			}
+			return nil
+		})
+		if err != nil {
+			return result, err
+		}
+		result.Pages++
+		if !more {
+			break
+		}
+	}
+	var claims []store.RecordingReferenceClaim
+	if err := w.gated(ctx, func() error {
+		var err error
+		claims, err = w.st.ClaimRecordingReferences(ctx, w.destination, time.Now().UTC(), 20)
+		return err
+	}); err != nil {
+		return result, err
+	}
+	for _, claim := range claims {
+		if err := w.deliver(ctx, claim); err != nil {
+			return result, err
+		}
+		result.Delivered++
+	}
+	if w.logger != nil {
+		w.logger.Debug("Recording reference pass", "examined", result.Examined, "pages", result.Pages, "delivered", result.Delivered)
+	}
+	return result, nil
+}
+
+func (w *Worker) deliver(ctx context.Context, claim store.RecordingReferenceClaim) error {
+	var m store.RecordingMessage
+	var exists bool
+	if err := w.gated(ctx, func() error {
+		var err error
+		m, exists, err = w.st.ReadRecordingMessage(ctx, claim.MessageID)
+		return err
+	}); err != nil {
+		return err
+	}
+	var ref Ref
+	rebuildable := false
+	if exists && m.Live {
+		for _, r := range messageRefs(m, w.origins) {
+			if r.RouteKey == claim.RouteKey && r.ReferenceSHA256() == claim.RefSHA256 {
+				ref, rebuildable = r, true
+				break
+			}
+		}
+	}
+	now := time.Now().UTC()
+	result := store.RecordingReferenceResult{State: claim.State, NextActionAt: now.Add(5 * time.Minute), LastSendAt: claim.LastSendAt, RetryCount: claim.RetryCount}
+	var receipt docbankmedia.Receipt
+	var err error
+	requestCtx, cancel := context.WithTimeout(ctx, referenceRequestTimeout)
+	defer cancel()
+	switch {
+	case rebuildable:
+		var occurrence docbankmedia.Occurrence
+		if err := json.Unmarshal([]byte(claim.OccurrenceJSON), &occurrence); err != nil {
+			return errors.New("invalid recording reference occurrence")
+		}
+		receipt, err = w.client.SubmitReference(requestCtx, docbankmedia.ReferenceRequest{OperationID: claim.OperationID, ReferenceURL: ref.Reference, CanonicalURL: ref.Canonical, Acquire: false, Occurrence: occurrence})
+		if err == nil {
+			result.State = "retained"
+		} else {
+			result.ErrorCode = docbankmedia.ErrorCode(err)
+			result.RetryCount++
+			httpErr, isHTTP := errors.AsType[*docbankmedia.HTTPError](err)
+			switch {
+			case errors.Is(err, docbankmedia.ErrCredentialUnavailable), errors.Is(err, docbankmedia.ErrInvalidRequest):
+				result.State = "pending"
+			case result.ErrorCode == "capability_unavailable":
+				result.State = "pending"
+				delay := 5 * time.Minute
+				for n := 1; n < result.RetryCount && delay < time.Hour; n++ {
+					delay *= 2
+				}
+				result.NextActionAt = now.Add(min(delay, time.Hour))
+			case isHTTP && httpErr.Retryable():
+				result.State = "pending"
+			case isHTTP:
+				result.State = "blocked"
+			default:
+				result.State = "uncertain"
+				result.LastSendAt = &now
+			}
+			if claim.State == "uncertain" {
+				result.State = "uncertain"
+			}
+		}
+	case claim.State == "uncertain":
+		receipt, err = w.client.OperationReceipt(requestCtx, claim.OperationID)
+		if err == nil {
+			result.State = "withdrawn"
+		} else {
+			result.ErrorCode = docbankmedia.ErrorCode(err)
+			if docbankmedia.IsNotFound(err) && claim.LastSendAt != nil && !now.Before(claim.LastSendAt.Add(referenceRequestTimeout+5*time.Minute)) {
+				result.State, result.ErrorCode = "withdrawn", "receipt_not_found"
+			}
+		}
+	default:
+		result.State = "withdrawn"
+	}
+	if err == nil {
+		result.SourceID, result.OccurrenceID, result.Outcome, result.CoverageState = receipt.SourceID, receipt.OccurrenceID, receipt.Outcome, receipt.CoverageState
+	}
+	return w.gated(ctx, func() error {
+		applied, err := w.st.FinishRecordingReference(ctx, claim, result)
+		if err != nil {
+			return err
+		}
+		if !applied {
+			return nil
+		}
+		if w.logger != nil {
+			w.logger.Info("Recording reference delivery", "message_id", claim.MessageID, "route_key", claim.RouteKey, "state", result.State, "error_code", result.ErrorCode, "source_id", result.SourceID, "occurrence_id", result.OccurrenceID, "outcome", result.Outcome, "coverage_state", result.CoverageState)
+		}
+		// A changed live reference can replace its old request only after receipt recovery.
+		if exists && result.State == "withdrawn" {
+			return w.reconcile(ctx, m)
+		}
+		return nil
+	})
+}

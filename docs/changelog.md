@@ -6,6 +6,10 @@ description: Release history for msgvault
 
 All notable changes to msgvault, grouped by release.
 
+## Unreleased
+
+- Route Loom, Cap and Teams recording links to Docbank in the background with separate reference consent, including existing messages. Self-hosted Cap requires an exact configured origin.
+
 ## 0.21.0
 <small>2026-10-02</small>
 
