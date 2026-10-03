@@ -247,6 +247,17 @@ func (a *storeAPIAdapter) selectDraftSender(
 				matches[key] = value
 			}
 		}
+		if len(matches) > 1 && grant != nil {
+			ref := draftSourceRef(source)
+			for key := range matches {
+				if !grant.AllowsSender(agentgrant.PermissionDraftCreate, ref, key) {
+					delete(matches, key)
+				}
+			}
+			if len(matches) == 0 {
+				return "", nil, draftReplyNotPermitted(errors.New("the grant allows none of the parent's addressed identities"))
+			}
+		}
 		if len(matches) > 1 {
 			return "", nil, draftReplyError("from_ambiguous", errors.New("--from is required when the parent addresses multiple confirmed identities"))
 		}

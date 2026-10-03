@@ -42,10 +42,13 @@ func TestDraftSenderRecipientSelection(t *testing.T) {
 	for _, tc := range []struct {
 		name, requested, want, code string
 		recipients                  []string
+		grantSenders                []string
 	}{
 		{name: "unique", recipients: []string{"shop@example.test"}, want: "<shop@example.test>"},
 		{name: "canonical duplicates", recipients: []string{"SHOP@example.test", "shop@example.test"}, want: "<shop@example.test>"},
 		{name: "two matches", recipients: []string{"shop@example.test", "primary@example.test"}, code: "from_ambiguous"},
+		{name: "two matches one granted", recipients: []string{"shop@example.test", "primary@example.test"}, grantSenders: []string{"primary@example.test"}, want: "<primary@example.test>"},
+		{name: "two matches none granted", recipients: []string{"shop@example.test", "primary@example.test"}, grantSenders: []string{"other@example.test"}, code: "not_permitted"},
 		{name: "no match", recipients: []string{"other@example.test", "unconfirmed@example.test", "malformed"}, code: "from_ambiguous"},
 		{name: "explicit", requested: `"Example, Owner" <primary@example.test>`, recipients: []string{"shop@example.test"}, want: `"Example, Owner" <primary@example.test>`},
 		{name: "malformed explicit", requested: "broken", recipients: []string{"shop@example.test"}, code: "invalid_from"},
@@ -57,7 +60,11 @@ func TestDraftSenderRecipientSelection(t *testing.T) {
 			for _, address := range tc.recipients {
 				recipients = append(recipients, store.MessageRecipient{EmailAddress: address})
 			}
-			from, selves, err := (&storeAPIAdapter{}).selectDraftSender(identities, recipients, tc.requested, nil, &store.Source{ID: 1})
+			var grant *agentgrant.Grant
+			if tc.grantSenders != nil {
+				grant = &agentgrant.Grant{Permissions: []agentgrant.Permission{agentgrant.PermissionDraftCreate}, Sources: []agentgrant.SourceRef{{ID: 1, SenderKeys: tc.grantSenders}}}
+			}
+			from, selves, err := (&storeAPIAdapter{}).selectDraftSender(identities, recipients, tc.requested, grant, &store.Source{ID: 1})
 			if tc.code != "" {
 				requirements.EqualError(err, tc.code)
 				return

@@ -214,7 +214,8 @@ destination, or reply within its original Gmail account. The daemon requires
 the matching operator grant. An explicit `--from` takes precedence. Otherwise,
 Msgvault uses the unique confirmed destination identity found in the parent's
 archived To, Cc, or Bcc recipients. Multiple matching identities require
-`--from`. A matching identity outside the agent's sender grant returns an
+`--from` unless the agent's grant allows exactly one of them. A matching
+identity outside the agent's sender grant returns an
 authorization error. With no match, `--from` is optional when exactly one
 confirmed identity is eligible. Compose and forward retain that eligibility
 rule without recipient inference.
@@ -3977,9 +3978,6 @@ currently confirmed valid mailbox identity. Sender selections are stored as
 canonical mailbox keys and remain fixed until the token is revoked. Adding an
 alias later does not expand an existing grant. A source with no selected sender
 has no delegated draft sender authority.
-
-After importing and confirming aliases, omit `--sender` to include them all in
-the reply grant. Reissue the token after confirming a new alias.
 
 The response includes the daemon address, the secret, and the granted source references.
 Pass `--agent-url <address>` and the file path to `--agent-token-file` when invoking delegated commands.
