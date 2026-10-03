@@ -138,60 +138,64 @@ type RecordingReferenceResult struct {
 
 func (s *Store) ReconcileRecordingReferences(ctx context.Context, destination string, messageID int64, live bool, refs []RecordingReferenceInput) error {
 	return s.withTxContext(ctx, func(tx *loggedTx) error {
-		q := boundQuerier{ctx: ctx, q: tx}
-		rows, err := tx.QueryContext(ctx, `SELECT route_key, ref_sha256, state, occurrence_id, occurrence_json FROM recording_references WHERE destination_key=? AND message_id=?`, destination, messageID)
-		if err != nil {
-			return err
-		}
-		type previous struct{ hash, state, receipt, occurrence string }
-		old := make(map[string]previous)
-		for rows.Next() {
-			var key string
-			var p previous
-			if err := rows.Scan(&key, &p.hash, &p.state, &p.receipt, &p.occurrence); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			old[key] = p
-		}
-		err = rows.Err()
-		_ = rows.Close()
-		if err != nil {
-			return err
-		}
-		now := s.dialect.TimestampParam(time.Now().UTC())
-		if live {
-			for _, ref := range refs {
-				p, exists := old[ref.RouteKey]
-				unchanged := p.hash == ref.RefSHA256 && p.occurrence == ref.OccurrenceJSON
-				delete(old, ref.RouteKey)
-				if !exists {
-					_, err = q.Exec(`INSERT INTO recording_references (destination_key,message_id,route_key,kind,origin,ref_sha256,operation_id,occurrence_json,state,next_action_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'pending',?,?)`, destination, messageID, ref.RouteKey, ref.Kind, ref.Origin, ref.RefSHA256, uuid.NewString(), ref.OccurrenceJSON, now, now)
-				} else if !unchanged && p.state != "uncertain" {
-					_, err = q.Exec(`UPDATE recording_references SET kind=?,origin=?,ref_sha256=?,operation_id=?,occurrence_json=?,state='pending',next_action_at=?,updated_at=?,error_code='',source_id='',occurrence_id='',outcome='',coverage_state='',last_send_at=NULL,retry_count=0 WHERE destination_key=? AND message_id=? AND route_key=?`, ref.Kind, ref.Origin, ref.RefSHA256, uuid.NewString(), ref.OccurrenceJSON, now, now, destination, messageID, ref.RouteKey)
-				} else if unchanged && p.state == "withdrawn" {
-					state := "pending"
-					if p.receipt != "" {
-						state = "retained"
-					}
-					_, err = q.Exec(`UPDATE recording_references SET state=?,next_action_at=?,updated_at=? WHERE destination_key=? AND message_id=? AND route_key=?`, state, now, now, destination, messageID, ref.RouteKey)
-				}
-				if err != nil {
-					return err
-				}
-			}
-		}
-		for key, p := range old {
-			// Uncertain sends need receipt recovery before their local withdrawal settles.
-			if p.state == "uncertain" {
-				continue
-			}
-			if _, err := q.Exec(`UPDATE recording_references SET state='withdrawn',updated_at=? WHERE destination_key=? AND message_id=? AND route_key=?`, now, destination, messageID, key); err != nil {
-				return err
-			}
-		}
-		return nil
+		return s.reconcileRecordingReferences(ctx, tx, destination, messageID, live, refs)
 	})
+}
+
+func (s *Store) reconcileRecordingReferences(ctx context.Context, tx *loggedTx, destination string, messageID int64, live bool, refs []RecordingReferenceInput) error {
+	q := boundQuerier{ctx: ctx, q: tx}
+	rows, err := tx.QueryContext(ctx, `SELECT route_key, ref_sha256, state, occurrence_id, occurrence_json FROM recording_references WHERE destination_key=? AND message_id=?`, destination, messageID)
+	if err != nil {
+		return err
+	}
+	type previous struct{ hash, state, receipt, occurrence string }
+	old := make(map[string]previous)
+	for rows.Next() {
+		var key string
+		var p previous
+		if err := rows.Scan(&key, &p.hash, &p.state, &p.receipt, &p.occurrence); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		old[key] = p
+	}
+	err = rows.Err()
+	_ = rows.Close()
+	if err != nil {
+		return err
+	}
+	now := s.dialect.TimestampParam(time.Now().UTC())
+	if live {
+		for _, ref := range refs {
+			p, exists := old[ref.RouteKey]
+			unchanged := p.hash == ref.RefSHA256 && p.occurrence == ref.OccurrenceJSON
+			delete(old, ref.RouteKey)
+			if !exists {
+				_, err = q.Exec(`INSERT INTO recording_references (destination_key,message_id,route_key,kind,origin,ref_sha256,operation_id,occurrence_json,state,next_action_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'pending',?,?)`, destination, messageID, ref.RouteKey, ref.Kind, ref.Origin, ref.RefSHA256, uuid.NewString(), ref.OccurrenceJSON, now, now)
+			} else if !unchanged && p.state != "uncertain" {
+				_, err = q.Exec(`UPDATE recording_references SET kind=?,origin=?,ref_sha256=?,operation_id=?,occurrence_json=?,state='pending',next_action_at=?,updated_at=?,error_code='',source_id='',occurrence_id='',outcome='',coverage_state='',last_send_at=NULL,retry_count=0 WHERE destination_key=? AND message_id=? AND route_key=?`, ref.Kind, ref.Origin, ref.RefSHA256, uuid.NewString(), ref.OccurrenceJSON, now, now, destination, messageID, ref.RouteKey)
+			} else if unchanged && p.state == "withdrawn" {
+				state := "pending"
+				if p.receipt != "" {
+					state = "retained"
+				}
+				_, err = q.Exec(`UPDATE recording_references SET state=?,next_action_at=?,updated_at=? WHERE destination_key=? AND message_id=? AND route_key=?`, state, now, now, destination, messageID, ref.RouteKey)
+			}
+			if err != nil {
+				return err
+			}
+		}
+	}
+	for key, p := range old {
+		// Uncertain sends need receipt recovery before their local withdrawal settles.
+		if p.state == "uncertain" {
+			continue
+		}
+		if _, err := q.Exec(`UPDATE recording_references SET state='withdrawn',updated_at=? WHERE destination_key=? AND message_id=? AND route_key=?`, now, destination, messageID, key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) ClaimRecordingReferences(ctx context.Context, destination string, now time.Time, limit int) ([]RecordingReferenceClaim, error) {
@@ -224,17 +228,28 @@ func (s *Store) MarkRecordingReferenceSending(ctx context.Context, claim Recordi
 	return n == 1, err
 }
 
-func (s *Store) FinishRecordingReference(ctx context.Context, claim RecordingReferenceClaim, result RecordingReferenceResult) (bool, error) {
+func (s *Store) FinishRecordingReference(ctx context.Context, claim RecordingReferenceClaim, result RecordingReferenceResult, live bool, refs []RecordingReferenceInput) (bool, error) {
 	var sent any
 	if result.LastSendAt != nil {
 		sent = s.dialect.TimestampParam(*result.LastSendAt)
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE recording_references SET state=?,next_action_at=?,error_code=?,source_id=?,occurrence_id=?,outcome=?,coverage_state=?,last_send_at=?,retry_count=?,updated_at=? WHERE destination_key=? AND message_id=? AND route_key=? AND operation_id=?`, result.State, s.dialect.TimestampParam(result.NextActionAt), result.ErrorCode, result.SourceID, result.OccurrenceID, result.Outcome, result.CoverageState, sent, result.RetryCount, s.dialect.TimestampParam(time.Now().UTC()), claim.DestinationKey, claim.MessageID, claim.RouteKey, claim.OperationID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n == 1, err
+	var applied bool
+	err := s.withTxContext(ctx, func(tx *loggedTx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE recording_references SET state=?,next_action_at=?,error_code=?,source_id=?,occurrence_id=?,outcome=?,coverage_state=?,last_send_at=?,retry_count=?,updated_at=? WHERE destination_key=? AND message_id=? AND route_key=? AND operation_id=?`, result.State, s.dialect.TimestampParam(result.NextActionAt), result.ErrorCode, result.SourceID, result.OccurrenceID, result.Outcome, result.CoverageState, sent, result.RetryCount, s.dialect.TimestampParam(time.Now().UTC()), claim.DestinationKey, claim.MessageID, claim.RouteKey, claim.OperationID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil || n == 0 {
+			return err
+		}
+		applied = true
+		if result.State != "uncertain" {
+			return s.reconcileRecordingReferences(ctx, tx, claim.DestinationKey, claim.MessageID, live, refs)
+		}
+		return nil
+	})
+	return applied && err == nil, err
 }
 
 func (s *Store) ReconsiderBlockedRecordingReferences(ctx context.Context, destination string) error {

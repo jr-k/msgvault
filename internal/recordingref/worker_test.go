@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -500,7 +501,7 @@ func TestRecordingReferenceUncertain(t *testing.T) {
 		require.NoError(err)
 		require.Len(claims, 1)
 		now := time.Now().UTC()
-		applied, err := f.Store.FinishRecordingReference(t.Context(), claims[0], store.RecordingReferenceResult{State: "uncertain", LastSendAt: &now, NextActionAt: now})
+		applied, err := f.Store.FinishRecordingReference(t.Context(), claims[0], store.RecordingReferenceResult{State: "uncertain", LastSendAt: &now, NextActionAt: now}, true, inputs)
 		require.NoError(err)
 		require.True(applied)
 		client := recordingClient(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
@@ -787,5 +788,202 @@ func TestRecordingReferenceOccurrenceCorrection(t *testing.T) {
 				assert.Empty(gets)
 			})
 		}
+	}
+}
+
+func rejectRecordingReplacement(t *testing.T, f *storetest.Fixture) func() {
+	t.Helper()
+	create := `CREATE TRIGGER reject_recording_replacement BEFORE UPDATE OF operation_id ON recording_references WHEN NEW.operation_id <> OLD.operation_id BEGIN SELECT RAISE(ABORT, 'injected recording replacement failure'); END`
+	drop := `DROP TRIGGER IF EXISTS reject_recording_replacement`
+	if f.Store.IsPostgreSQL() {
+		create = `CREATE FUNCTION reject_recording_replacement() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected recording replacement failure'; END; $$ LANGUAGE plpgsql;
+CREATE TRIGGER reject_recording_replacement BEFORE UPDATE OF operation_id ON recording_references FOR EACH ROW WHEN (NEW.operation_id <> OLD.operation_id) EXECUTE FUNCTION reject_recording_replacement()`
+		drop = `DROP TRIGGER IF EXISTS reject_recording_replacement ON recording_references; DROP FUNCTION IF EXISTS reject_recording_replacement()`
+	}
+	_, err := f.Store.DB().Exec(create)
+	require.NoError(t, err)
+	return func() {
+		_, err := f.Store.DB().Exec(drop)
+		require.NoError(t, err)
+	}
+}
+
+func TestRecordingReferenceSettlementRollback(t *testing.T) {
+	for _, field := range []string{"sent_at", "source_message_id"} {
+		t.Run(field, func(t *testing.T) {
+			assert, require := assert.New(t), require.New(t)
+			f := storetest.New(t)
+			id := f.NewMessage().WithSourceMessageID("original").WithSentAt(time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)).Create(t, f.Store)
+			recordingBody(t, f, id, "https://loom.com/share/abc")
+			requests := make(chan docbankmedia.ReferenceRequest, 5)
+			var ready atomic.Bool
+			client := recordingClient(t, func(w http.ResponseWriter, r *http.Request) {
+				var req docbankmedia.ReferenceRequest
+				if !assert.NoError(json.UnmarshalRead(r.Body, &req)) {
+					return
+				}
+				requests <- req
+				if !ready.Load() {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				writeReceipt(w, req.OperationID)
+			})
+			worker := NewWorker(f.Store, client, "destination", nil, nil)
+			runDiscovery(t, worker, 1)
+			require.Len(requests, 1)
+			original := <-requests
+			value := "corrected"
+			if field == "sent_at" {
+				value = "2026-01-01 10:00:00.000"
+			}
+			_, err := f.Store.DB().Exec(f.Store.Rebind(`UPDATE messages SET `+field+`=? WHERE id=?`), value, id)
+			require.NoError(err)
+			assert.Eventually(func() bool {
+				result, err := worker.RunBatch(t.Context())
+				require.NoError(err)
+				return result.Examined > 0
+			}, 5*time.Second, 10*time.Millisecond)
+			before, err := f.Store.LoadRecordingReferenceCursor(t.Context(), "destination")
+			require.NoError(err)
+			claims, err := f.Store.ClaimRecordingReferences(t.Context(), "destination", time.Now().Add(time.Hour), 20)
+			require.NoError(err)
+			require.Len(claims, 1)
+			frozen := claims[0]
+			restore := rejectRecordingReplacement(t, f)
+			t.Cleanup(restore)
+			ready.Store(true)
+			due(t, f)
+			_, err = worker.RunBatch(t.Context())
+			require.ErrorContains(err, "injected recording replacement failure")
+			require.Len(requests, 1)
+			assert.Equal(original, <-requests)
+			claims, err = f.Store.ClaimRecordingReferences(t.Context(), "destination", time.Now().Add(time.Hour), 20)
+			require.NoError(err)
+			require.Len(claims, 1)
+			assert.Equal("uncertain", claims[0].State)
+			assert.Equal(frozen.OperationID, claims[0].OperationID)
+			assert.Equal(frozen.OccurrenceJSON, claims[0].OccurrenceJSON)
+			assert.Equal(frozen.ErrorCode, claims[0].ErrorCode)
+			assert.Equal(frozen.RetryCount, claims[0].RetryCount)
+			var receipt string
+			require.NoError(f.Store.DB().QueryRow(`SELECT occurrence_id FROM recording_references`).Scan(&receipt))
+			assert.Empty(receipt)
+			restore()
+			worker = NewWorker(f.Store, client, "destination", nil, nil)
+			due(t, f)
+			result, err := worker.RunBatch(t.Context())
+			require.NoError(err)
+			assert.Zero(result.Examined)
+			require.Len(requests, 1)
+			assert.Equal(original, <-requests)
+			state, _, op := recordingState(t, f, id)
+			assert.Equal("pending", state)
+			assert.NotEqual(original.OperationID, op)
+			_, err = worker.RunBatch(t.Context())
+			require.NoError(err)
+			require.Len(requests, 1)
+			corrected := <-requests
+			assert.Equal(op, corrected.OperationID)
+			assert.NotEqual(original.Occurrence, corrected.Occurrence)
+			after, err := f.Store.LoadRecordingReferenceCursor(t.Context(), "destination")
+			require.NoError(err)
+			assert.False(after.At.Before(before.At))
+			assert.Equal(before.Policy, after.Policy)
+			_, err = worker.RunBatch(t.Context())
+			require.NoError(err)
+			assert.Empty(requests)
+		})
+	}
+}
+
+func TestRecordingReferenceCorrectionDuringHTTP(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusUnprocessableEntity} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			assert, require := assert.New(t), require.New(t)
+			f := storetest.New(t)
+			id := f.CreateMessage("original")
+			recordingBody(t, f, id, "https://loom.com/share/abc")
+			requests := make(chan docbankmedia.ReferenceRequest, 5)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
+			var posts atomic.Int32
+			client := recordingClient(t, func(w http.ResponseWriter, r *http.Request) {
+				var req docbankmedia.ReferenceRequest
+				if !assert.NoError(json.UnmarshalRead(r.Body, &req)) {
+					return
+				}
+				requests <- req
+				if posts.Add(1) == 1 {
+					select {
+					case <-release:
+					case <-r.Context().Done():
+						return
+					}
+					if status != http.StatusOK {
+						w.WriteHeader(status)
+						return
+					}
+				}
+				writeReceipt(w, req.OperationID)
+			})
+			var mu sync.Mutex
+			gate := func(context.Context) (func(), bool) { mu.Lock(); return mu.Unlock, true }
+			worker := NewWorker(f.Store, client, "destination", nil, nil).WithOperationGate(gate)
+			done := make(chan error, 1)
+			go func() {
+				for {
+					result, err := worker.RunBatch(t.Context())
+					if err != nil || result.Attempted > 0 {
+						done <- err
+						return
+					}
+					select {
+					case <-time.After(10 * time.Millisecond):
+					case <-t.Context().Done():
+						done <- t.Context().Err()
+						return
+					}
+				}
+			}()
+			var original docbankmedia.ReferenceRequest
+			select {
+			case original = <-requests:
+			case <-time.After(5 * time.Second):
+				require.FailNow("request did not reach HTTP")
+			}
+			mu.Lock()
+			_, err := f.Store.DB().Exec(f.Store.Rebind(`UPDATE messages SET source_message_id=? WHERE id=?`), "corrected", id)
+			mu.Unlock()
+			require.NoError(err)
+			discovery := NewWorker(f.Store, client, "destination", nil, nil).WithOperationGate(gate)
+			assert.Eventually(func() bool {
+				result, err := discovery.RunBatch(t.Context())
+				require.NoError(err)
+				return result.Examined > 0 && result.Attempted == 0
+			}, 5*time.Second, 10*time.Millisecond)
+			unblock()
+			select {
+			case err := <-done:
+				require.NoError(err)
+			case <-time.After(5 * time.Second):
+				require.FailNow("request completion did not settle")
+			}
+			state, _, op := recordingState(t, f, id)
+			assert.Equal("pending", state)
+			assert.NotEqual(original.OperationID, op)
+			result, err := discovery.RunBatch(t.Context())
+			require.NoError(err)
+			assert.Zero(result.Examined)
+			require.Len(requests, 1)
+			corrected := <-requests
+			assert.Equal(op, corrected.OperationID)
+			assert.NotEqual(original.Occurrence.Ref, corrected.Occurrence.Ref)
+			_, err = discovery.RunBatch(t.Context())
+			require.NoError(err)
+			assert.Empty(requests)
+		})
 	}
 }

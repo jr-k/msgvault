@@ -43,7 +43,7 @@ func TestRecordingReferenceState(t *testing.T) {
 	require.Len(claims, 1)
 	first := claims[0]
 	now := time.Now().UTC()
-	ok, err := f.Store.FinishRecordingReference(t.Context(), first, store.RecordingReferenceResult{State: "uncertain", LastSendAt: &now, NextActionAt: now})
+	ok, err := f.Store.FinishRecordingReference(t.Context(), first, store.RecordingReferenceResult{State: "uncertain", LastSendAt: &now, NextActionAt: now}, true, []store.RecordingReferenceInput{input})
 	require.NoError(err)
 	assert.True(ok)
 	require.NoError(f.Store.ReconcileRecordingReferences(t.Context(), "destination", id, false, nil))
@@ -51,7 +51,7 @@ func TestRecordingReferenceState(t *testing.T) {
 	require.NoError(err)
 	require.Len(claims, 1)
 	assert.Equal("uncertain", claims[0].State)
-	ok, err = f.Store.FinishRecordingReference(t.Context(), first, store.RecordingReferenceResult{State: "withdrawn", NextActionAt: now})
+	ok, err = f.Store.FinishRecordingReference(t.Context(), first, store.RecordingReferenceResult{State: "withdrawn", NextActionAt: now}, false, nil)
 	require.NoError(err)
 	assert.True(ok)
 	input.RefSHA256 = "new-hash"
@@ -60,7 +60,7 @@ func TestRecordingReferenceState(t *testing.T) {
 	require.NoError(err)
 	require.Len(claims, 1)
 	assert.NotEqual(first.OperationID, claims[0].OperationID)
-	ok, err = f.Store.FinishRecordingReference(t.Context(), first, store.RecordingReferenceResult{State: "retained", NextActionAt: now})
+	ok, err = f.Store.FinishRecordingReference(t.Context(), first, store.RecordingReferenceResult{State: "retained", NextActionAt: now}, true, []store.RecordingReferenceInput{input})
 	require.NoError(err)
 	assert.False(ok)
 	ok, err = f.Store.MarkRecordingReferenceSending(t.Context(), first, now)
@@ -91,7 +91,7 @@ func TestRecordingReferenceOccurrenceCorrection(t *testing.T) {
 			first := claims[0]
 			now := time.Now().UTC().Truncate(time.Millisecond)
 			result := store.RecordingReferenceResult{State: state, ErrorCode: "receipt_server_error", SourceID: "source", OccurrenceID: "occurrence", Outcome: "access_required", CoverageState: "unprocessed", LastSendAt: &now, RetryCount: 2, NextActionAt: now}
-			ok, err := f.Store.FinishRecordingReference(t.Context(), first, result)
+			ok, err := f.Store.FinishRecordingReference(t.Context(), first, result, state != "withdrawn", []store.RecordingReferenceInput{input})
 			require.NoError(err)
 			require.True(ok)
 			input.OccurrenceJSON = `{"ref":"corrected"}`
@@ -107,7 +107,7 @@ func TestRecordingReferenceOccurrenceCorrection(t *testing.T) {
 				assert.Equal(2, claims[0].RetryCount)
 				assert.Equal(result.ErrorCode, claims[0].ErrorCode)
 				result.State = "retained"
-				ok, err = f.Store.FinishRecordingReference(t.Context(), first, result)
+				ok, err = f.Store.FinishRecordingReference(t.Context(), first, result, true, []store.RecordingReferenceInput{input})
 				require.NoError(err)
 				require.True(ok)
 				require.NoError(f.Store.ReconcileRecordingReferences(t.Context(), "destination", id, true, []store.RecordingReferenceInput{input}))
@@ -129,7 +129,7 @@ func TestRecordingReferenceOccurrenceCorrection(t *testing.T) {
 			assert.Empty(occurrence)
 			assert.Empty(outcome)
 			assert.Empty(coverage)
-			ok, err = f.Store.FinishRecordingReference(t.Context(), first, result)
+			ok, err = f.Store.FinishRecordingReference(t.Context(), first, result, true, []store.RecordingReferenceInput{first.RecordingReferenceInput})
 			require.NoError(err)
 			assert.False(ok)
 			require.NoError(f.Store.ReconcileRecordingReferences(t.Context(), "destination", id, true, []store.RecordingReferenceInput{input}))

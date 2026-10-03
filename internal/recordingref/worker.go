@@ -279,7 +279,15 @@ func (w *Worker) deliver(ctx context.Context, claim store.RecordingReferenceClai
 		result.SourceID, result.OccurrenceID, result.Outcome, result.CoverageState = receipt.SourceID, receipt.OccurrenceID, receipt.Outcome, receipt.CoverageState
 	}
 	return w.gated(ctx, func() error {
-		applied, err := w.st.FinishRecordingReference(ctx, claim, result)
+		current, exists, err := w.st.ReadRecordingMessage(ctx, claim.MessageID)
+		if err != nil {
+			return err
+		}
+		inputs, err := referenceInputs(current, messageRefs(current, w.origins))
+		if err != nil {
+			return err
+		}
+		applied, err := w.st.FinishRecordingReference(ctx, claim, result, exists && current.Live, inputs)
 		if err != nil {
 			return err
 		}
@@ -288,10 +296,6 @@ func (w *Worker) deliver(ctx context.Context, claim store.RecordingReferenceClai
 		}
 		if w.logger != nil {
 			w.logger.Info("Recording reference delivery", "message_id", claim.MessageID, "route_key", claim.RouteKey, "state", result.State, "error_code", result.ErrorCode, "source_id", result.SourceID, "occurrence_id", result.OccurrenceID, "outcome", result.Outcome, "coverage_state", result.CoverageState)
-		}
-		// Deferred request changes can replace the old operation only after it settles.
-		if exists && (result.State == "retained" || result.State == "withdrawn") {
-			return w.reconcile(ctx, m)
 		}
 		return nil
 	})
