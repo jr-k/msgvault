@@ -62,7 +62,8 @@
 {:else if recordings.length > 0}
   <section class="recordings" aria-label="Recordings">
     <ol>
-      {#each recordings as recording (recording.attachment_id)}
+      <!-- An attachment can briefly have two live revisions, so the row index is the key. -->
+      {#each recordings as recording, row (row)}
         <li>
           <div class="recording-file">
             <strong>{recording.filename || '(unnamed recording)'}</strong>

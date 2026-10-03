@@ -78,6 +78,18 @@ describe('MessageRecordings', () => {
     expect(section.querySelector('.transcript')).toBeNull();
   });
 
+  it('lists two live revisions of one attachment', async () => {
+    mount({
+      message_id: 9,
+      recordings: [recording({ state: 'processing' }), recording({ state: 'unavailable' })]
+    });
+
+    const section = await screen.findByRole('region', { name: 'Recordings' });
+    expect(section.querySelectorAll('li')).toHaveLength(2);
+    expect(section.textContent).toContain('Transcript is still processing.');
+    expect(section.textContent).toContain('Transcript unavailable.');
+  });
+
   it('reports a failed request', async () => {
     mount({ error: 'unavailable', message: 'unavailable' }, 503);
 

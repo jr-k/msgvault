@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.kenn.io/msgvault/internal/attachmentpolicy"
+	"go.kenn.io/msgvault/internal/beeper"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/docbankmedia"
 	"go.kenn.io/msgvault/internal/store"
@@ -104,6 +106,9 @@ type recordingFixture struct {
 	f       *storetest.Fixture
 	docbank *fakeDocbank
 	client  *docbankmedia.Client
+	parts   map[string][]string
+	// transcripts holds each message's provider transcript text.
+	transcripts map[string]string
 }
 
 func newRecordingFixture(t *testing.T) *recordingFixture {
@@ -115,7 +120,7 @@ func newRecordingFixture(t *testing.T) *recordingFixture {
 	docbank := newFakeDocbank(t)
 	client, err := docbankmedia.NewClient(docbank.server.URL, func() (string, error) { return "docbank-key", nil })
 	require.NoError(t, err)
-	return &recordingFixture{f: f, docbank: docbank, client: client}
+	return &recordingFixture{f: f, docbank: docbank, client: client, parts: map[string][]string{}, transcripts: map[string]string{}}
 }
 
 func (rf *recordingFixture) server(consent bool) *Server {
@@ -138,12 +143,28 @@ func (rf *recordingFixture) message(t *testing.T, sourceMessageID string) int64 
 	require.NoError(t, err)
 	require.NoError(t, st.UpsertMessageBody(messageID,
 		sql.NullString{String: "authored body " + sourceMessageID, Valid: true}, sql.NullString{}))
-	require.NoError(t, st.UpsertMessageRawWithFormat(messageID, beeperRaw(sourceMessageID), "beeper_json"))
+	rf.parts[sourceMessageID] = []string{""}
+	rf.writeRaw(t, messageID, sourceMessageID)
 	return messageID
 }
 
-func beeperRaw(sourceMessageID string) []byte {
-	return []byte(fmt.Sprintf(`{"id":%q,"attachments":[{"id":"mxc://audio/%s"}]}`, sourceMessageID, sourceMessageID))
+// writeRaw saves the Beeper message JSON with one voice note per known part,
+// each carrying the message's provider transcript when one is set.
+func (rf *recordingFixture) writeRaw(t *testing.T, messageID int64, sourceMessageID string) []byte {
+	t.Helper()
+	transcript := rf.transcripts[sourceMessageID]
+	attachments := make([]map[string]any, 0, len(rf.parts[sourceMessageID]))
+	for _, part := range rf.parts[sourceMessageID] {
+		attachment := map[string]any{"id": "mxc://audio/" + sourceMessageID + part, "isVoiceNote": true}
+		if transcript != "" {
+			attachment["transcription"] = map[string]any{"transcription": transcript}
+		}
+		attachments = append(attachments, attachment)
+	}
+	raw, err := json.Marshal(map[string]any{"id": sourceMessageID, "attachments": attachments})
+	require.NoError(t, err)
+	require.NoError(t, rf.f.Store.UpsertMessageRawWithFormat(messageID, raw, "beeper_json"))
+	return raw
 }
 
 // audio adds a stored voice note to the message and records its occurrence.
@@ -166,19 +187,24 @@ func (rf *recordingFixture) audio(
 	var attachmentID int64
 	require.NoError(t, st.DB().QueryRow(st.Rebind(
 		`SELECT id FROM attachments WHERE message_id = ? AND content_hash = ?`), messageID, hash).Scan(&attachmentID))
-	rawDigest := sha256.Sum256(beeperRaw(sourceMessageID))
+	if !slices.Contains(rf.parts[sourceMessageID], part) {
+		rf.parts[sourceMessageID] = append(rf.parts[sourceMessageID], part)
+	}
+	rawDigest := sha256.Sum256(rf.writeRaw(t, messageID, sourceMessageID))
+	revision, err := beeper.MediaRevision(t.Context(), st, attachmentID)
+	require.NoError(t, err)
 	transcriptHash := ""
 	if processingKey != "" {
 		transcriptHash = strings.Repeat("b", 64)
 	}
 	ref := "msgvault:" + sourceMessageID + part
 	mapping := store.BeeperMediaMapping{
-		DestinationKey: recordingsTestDestination, OccurrenceRef: ref, Revision: "r1",
+		DestinationKey: recordingsTestDestination, OccurrenceRef: ref, Revision: revision,
 		SourceType: "beeper", SourceIdentifier: "signal", SourceConversationID: "default-thread",
 		SourceMessageID: sourceMessageID, SourceAttachmentID: partKey, SourcePartKey: partKey,
 		MessageID: messageID, AttachmentID: attachmentID, SourceSHA256: hash, ByteLength: 44,
 		RawHash: hex.EncodeToString(rawDigest[:]), TranscriptSHA256: transcriptHash,
-		OccurrenceJSON: `{"ref":"` + ref + `","revision":"r1"}`, Filename: "voice.wav", MIMEType: "audio/wav",
+		OccurrenceJSON: `{"ref":"` + ref + `","revision":"` + revision + `"}`, Filename: "voice.wav", MIMEType: "audio/wav",
 		ProcessingKey: processingKey, ProcessingProvider: "beeper", ProcessingProfile: "supplied-transcript",
 	}
 	require.NoError(t, st.ReconcileBeeperMediaMapping(t.Context(), mapping))
@@ -188,7 +214,7 @@ func (rf *recordingFixture) audio(
 	}
 	prepared, err := st.PrepareBeeperMediaOperation(t.Context(), store.BeeperMediaOperation{
 		Kind: store.BeeperMediaOperationRetain, DestinationKey: recordingsTestDestination,
-		OccurrenceRef: ref, Revision: "r1",
+		OccurrenceRef: ref, Revision: revision,
 	})
 	require.NoError(t, err)
 	finished := *result
@@ -335,10 +361,14 @@ func TestMessageRecordingsStates(t *testing.T) {
 	rf.audio(t, unsupportedMessage, "unsupported", "", "", &store.BeeperMediaResult{ErrorCode: "unsupported_media"})
 	assert.Equal("unsupported", recordingsFor(t, srv, unsupportedMessage)[0].State)
 
-	sourceMissingMessage := rf.message(t, "source-missing")
-	rf.audio(t, sourceMissingMessage, "source-missing", "", "",
-		&store.BeeperMediaResult{SourceUnavailable: true, ErrorCode: "source_unavailable"})
-	assert.Equal("media_missing", recordingsFor(t, srv, sourceMissingMessage)[0].State)
+	// The worker retries a source it could not read, whatever the reason code.
+	for _, code := range []string{"source_unavailable", "source_changed"} {
+		sourceMissingMessage := rf.message(t, "source-missing-"+code)
+		rf.audio(t, sourceMissingMessage, "source-missing-"+code, "", "",
+			&store.BeeperMediaResult{SourceUnavailable: true, ErrorCode: code})
+		assert.Equal("processing", recordingsFor(t, srv, sourceMissingMessage)[0].State, code)
+		assert.Equal("unavailable", recordingsFor(t, noConsent, sourceMissingMessage)[0].State, code)
+	}
 
 	uncapturedMessage := rf.message(t, "uncaptured")
 	for _, write := range []store.AttachmentWrite{
@@ -355,15 +385,24 @@ func TestMessageRecordingsStates(t *testing.T) {
 			SourcePartKey: "slack:clip", State: attachmentpolicy.StateFailed,
 			SkipReason: attachmentpolicy.SkipFetchFailure, Role: store.AttachmentRoleStandalone,
 			RoleSource: store.AttachmentRoleSourceImporterSemantics},
+		// Importers can leave voice notes with a generic type and only a name.
+		{Filename: "note.OGG", MIMEType: "application/octet-stream", Size: 9, SourceAttachmentID: "beeper:note-ogg",
+			SourcePartKey: "beeper:note-ogg", State: attachmentpolicy.StateFailed,
+			SkipReason: attachmentpolicy.SkipFetchFailure, Role: store.AttachmentRoleStandalone,
+			RoleSource: store.AttachmentRoleSourceImporterSemantics},
+		{Filename: "memo.m4a", Size: 8, SourceAttachmentID: "beeper:memo-m4a",
+			SourcePartKey: "beeper:memo-m4a", State: attachmentpolicy.StateFailed,
+			SkipReason: attachmentpolicy.SkipFetchFailure, Role: store.AttachmentRoleStandalone,
+			RoleSource: store.AttachmentRoleSourceImporterSemantics},
 	} {
 		require.NoError(rf.f.Store.UpsertAttachmentRecord(t.Context(), uncapturedMessage, write))
 	}
 	recordings = recordingsFor(t, srv, uncapturedMessage)
-	require.Len(recordings, 2)
-	assert.Equal("late.ogg", recordings[0].Filename)
-	assert.Equal("media_missing", recordings[0].State)
-	assert.Equal("clip.mp3", recordings[1].Filename)
-	assert.Equal("media_missing", recordings[1].State)
+	require.Len(recordings, 4)
+	for i, filename := range []string{"late.ogg", "clip.mp3", "note.OGG", "memo.m4a"} {
+		assert.Equal(filename, recordings[i].Filename)
+		assert.Equal("media_missing", recordings[i].State, filename)
+	}
 	assert.Equal(before, rf.docbank.requestCount())
 
 	// One recording's Docbank failure never hides another.
@@ -457,6 +496,80 @@ func TestMessageRecordingsVisibility(t *testing.T) {
 	var detail MessageDetail
 	require.NoError(json.Unmarshal(response.Body.Bytes(), &detail))
 	assert.Equal("authored body served", detail.Body)
+}
+
+func TestMessageRecordingsProviderTranscriptEdit(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	rf := newRecordingFixture(t)
+	srv := rf.server(true)
+	noConsent := rf.server(false)
+	const obsolete = "synthetic transcript before the edit"
+
+	seed := func(sourceMessageID string) recordingSeed {
+		rf.transcripts[sourceMessageID] = obsolete
+		return rf.retained(t, sourceMessageID)
+	}
+	edit := func(r recordingSeed, sourceMessageID string) {
+		rf.transcripts[sourceMessageID] = "synthetic transcript after the edit"
+		rf.writeRaw(t, r.messageID, sourceMessageID)
+	}
+	supplied := func(r recordingSeed) func(http.ResponseWriter) {
+		return evidenceResponse(r, "vault", "ready", "succeeded", readyEvidence("supplied", "complete",
+			map[string]any{"text": obsolete}))
+	}
+
+	before := seed("before")
+	rf.docbank.set(before.contentVersionID, supplied(before))
+	recordings := recordingsFor(t, srv, before.messageID)
+	require.Len(recordings, 1)
+	assert.Equal("ready", recordings[0].State, "an unedited provider transcript shows")
+
+	// Editing the provider transcript keeps the audio, so only the revision tells.
+	edit(before, "before")
+	for server, want := range map[*Server]string{srv: "processing", noConsent: "unavailable"} {
+		status, body, raw := getRecordings(t, server, strconv.FormatInt(before.messageID, 10))
+		require.Equal(http.StatusOK, status, raw)
+		require.Len(body.Recordings, 1)
+		assert.Equal(want, body.Recordings[0].State)
+		assert.NotContains(raw, obsolete)
+	}
+
+	during := seed("during")
+	respond := supplied(during)
+	rf.docbank.set(during.contentVersionID, func(w http.ResponseWriter) {
+		edit(during, "during")
+		respond(w)
+	})
+	_, _, raw := getRecordings(t, srv, strconv.FormatInt(during.messageID, 10))
+	assert.Contains(raw, `"state":"processing"`)
+	assert.NotContains(raw, obsolete)
+
+	// An edit during a later recording's read still withholds the earlier one.
+	pairMessage := rf.message(t, "pair")
+	rf.transcripts["pair"] = obsolete
+	first := rf.audio(t, pairMessage, "pair", "-a", "", &store.BeeperMediaResult{VaultUID: "vault"})
+	second := rf.audio(t, pairMessage, "pair", "-b", "", &store.BeeperMediaResult{VaultUID: "vault"})
+	rf.docbank.set(first.contentVersionID, supplied(first))
+	respondSecond := evidenceResponse(second, "vault", "pending", "running", nil)
+	rf.docbank.set(second.contentVersionID, func(w http.ResponseWriter) {
+		edit(first, "pair")
+		respondSecond(w)
+	})
+	_, body, raw := getRecordings(t, srv, strconv.FormatInt(pairMessage, 10))
+	require.Len(body.Recordings, 2)
+	assert.Equal("processing", body.Recordings[0].State)
+	assert.Nil(body.Recordings[0].Transcript)
+	assert.NotContains(raw, obsolete)
+
+	// A generated transcript comes from the audio, which the edit left alone.
+	generated := seed("generated-edit")
+	rf.docbank.evidence(generated, "vault", "ready", "succeeded", readyEvidence("generated", "complete",
+		map[string]any{"text": "synthetic generated transcript"}))
+	edit(generated, "generated-edit")
+	recordings = recordingsFor(t, srv, generated.messageID)
+	require.Len(recordings, 1)
+	assert.Equal("ready", recordings[0].State)
 }
 
 func TestMessageRecordingsDisabled(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"go.kenn.io/msgvault/internal/beeper"
 	"go.kenn.io/msgvault/internal/docbankmedia"
 	"go.kenn.io/msgvault/internal/store"
 )
@@ -105,11 +106,29 @@ func (reader *MessageRecordingReader) list(
 	}
 	kept := recordings[:0]
 	for i, recording := range recordings {
-		if live[keys[i]] {
-			kept = append(kept, recording)
+		if !live[keys[i]] {
+			continue
 		}
+		// An edited provider transcript keeps the audio but changes the revision,
+		// which discovery then sends again.
+		if recording.Transcript != nil && recording.Transcript.Origin == "supplied" {
+			revision, err := beeper.MediaRevision(ctx, reader.Store, occurrences[i].AttachmentID)
+			if err != nil || revision != occurrences[i].Revision {
+				recording.State, recording.Transcript = reader.retryState(), nil
+			}
+		}
+		kept = append(kept, recording)
 	}
 	return kept, nil
+}
+
+// retryState labels a recording the media worker will send again, which it
+// does only while it may upload.
+func (reader *MessageRecordingReader) retryState() string {
+	if reader.UploadConsent {
+		return recordingProcessing
+	}
+	return recordingUnavailable
 }
 
 func (reader *MessageRecordingReader) recording(
@@ -122,17 +141,12 @@ func (reader *MessageRecordingReader) recording(
 	}
 	switch o.RetentionState {
 	case store.BeeperMediaRetentionRetained:
-	case store.BeeperMediaRetentionPending:
-		if reader.UploadConsent {
-			result.State = recordingProcessing
-		}
+	case store.BeeperMediaRetentionPending, store.BeeperMediaRetentionSourceUnavailable:
+		result.State = reader.retryState()
 		return result
 	default:
-		switch o.ErrorCode {
-		case "unsupported_media":
+		if o.ErrorCode == "unsupported_media" {
 			result.State = recordingUnsupported
-		case "source_unavailable":
-			result.State = recordingMediaMissing
 		}
 		return result
 	}
