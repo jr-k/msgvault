@@ -954,6 +954,10 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 		}
 	}
 	nullableSchemaProperty(schemas["PersonBriefEnrollment"], "enabled_at")
+	// Bare enum constants would claim names like Unavailable and rename the
+	// existing constants the generator resolves later.
+	prefixClientEnumNames(schemas["MessageRecording"], "state", "MessageRecordingState")
+	prefixClientEnumNames(schemas["MessageTranscript"], "origin", "MessageTranscriptOrigin")
 	// Read responses preserve definitions from any stored schema version.
 	if view := schemas["SavedView"]; view != nil {
 		state := view.Properties["canonical_state"]
@@ -1194,6 +1198,26 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 		return
 	}
 	setCodegenGoType(values, "any")
+}
+
+func prefixClientEnumNames(schema *huma.Schema, propertyName, prefix string) {
+	if schema == nil || schema.Properties[propertyName] == nil {
+		return
+	}
+	property := schema.Properties[propertyName]
+	names := make([]any, 0, len(property.Enum))
+	for _, value := range property.Enum {
+		var name strings.Builder
+		name.WriteString(prefix)
+		for word := range strings.SplitSeq(fmt.Sprint(value), "_") {
+			name.WriteString(strings.ToUpper(word[:1]) + word[1:])
+		}
+		names = append(names, name.String())
+	}
+	if property.Extensions == nil {
+		property.Extensions = map[string]any{}
+	}
+	property.Extensions["x-enum-names"] = names
 }
 
 func setCodegenGoType(schema *huma.Schema, goType string) {

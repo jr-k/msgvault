@@ -6369,6 +6369,14 @@ components:
             - media_missing
             - unavailable
           type: string
+          x-enum-names:
+            - MessageRecordingStateReady
+            - MessageRecordingStateProcessing
+            - MessageRecordingStateMissing
+            - MessageRecordingStateFailed
+            - MessageRecordingStateUnsupported
+            - MessageRecordingStateMediaMissing
+            - MessageRecordingStateUnavailable
         transcript:
           $ref: "#/components/schemas/MessageTranscript"
       required:
@@ -6460,6 +6468,9 @@ components:
             - supplied
             - generated
           type: string
+          x-enum-names:
+            - MessageTranscriptOriginSupplied
+            - MessageTranscriptOriginGenerated
         partial:
           type: boolean
         units:
