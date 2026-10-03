@@ -301,7 +301,7 @@ func (a *storeAPIAdapter) selectDraftSender(
 	return candidates[0], selfAddresses, nil
 }
 
-// Source authorization precedes recipient and fallback MIME reads; sender and provider checks precede remote writes.
+// Source authorization precedes recipient and original MIME reads; sender and provider checks precede remote writes.
 func (a *storeAPIAdapter) resolveDraftTarget(
 	ctx context.Context,
 	parentID *int64,
@@ -364,30 +364,21 @@ func (a *storeAPIAdapter) resolveDraftTarget(
 			}
 			parentRecipients = append(parentRecipients, recipients...)
 		}
-		needsRaw := len(parentRecipients) == 0
-		for _, recipient := range parentRecipients {
-			if strings.TrimSpace(recipient.EnvelopeAddress) == "" {
-				needsRaw = true
-				break
-			}
+		raw, err = a.store.GetMessageRawContext(ctx, *parentID)
+		if err != nil {
+			return draftReplyTarget{}, "", nil, draftReplyError("invalid_parent", fmt.Errorf("load raw MIME for message %d: %w", *parentID, err))
 		}
-		if needsRaw {
-			raw, err = a.store.GetMessageRawContext(ctx, *parentID)
+		message, err := mail.ReadMessage(bytes.NewReader(raw))
+		if err != nil {
+			return draftReplyTarget{}, "", nil, draftReplyError("invalid_parent", fmt.Errorf("read parent headers: %w", err))
+		}
+		for _, role := range []string{"To", "Cc"} {
+			addresses, err := enmime.ParseAddressList(strings.Join(message.Header[role], ", "))
 			if err != nil {
-				return draftReplyTarget{}, "", nil, draftReplyError("invalid_parent", fmt.Errorf("load raw MIME for message %d: %w", *parentID, err))
+				continue
 			}
-			message, err := mail.ReadMessage(bytes.NewReader(raw))
-			if err != nil {
-				return draftReplyTarget{}, "", nil, draftReplyError("invalid_parent", fmt.Errorf("read parent headers: %w", err))
-			}
-			for _, role := range []string{"To", "Cc"} {
-				addresses, err := enmime.ParseAddressList(message.Header.Get(role))
-				if err != nil {
-					continue
-				}
-				for _, address := range addresses {
-					parentRecipients = append(parentRecipients, store.MessageRecipient{EnvelopeAddress: address.Address})
-				}
+			for _, address := range addresses {
+				parentRecipients = append(parentRecipients, store.MessageRecipient{EnvelopeAddress: address.Address})
 			}
 		}
 	}

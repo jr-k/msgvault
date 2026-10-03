@@ -240,9 +240,9 @@ Reply-To or From, then visible To and Cc recipients. It removes confirmed
 identities for the selected destination and never reads a parent's Bcc as a
 reply recipient. An explicit `--from` takes precedence and must be a confirmed
 identity for that source. Otherwise, Msgvault uses the unique confirmed
-destination identity found in the parent's archived To, Cc, or Bcc recipients.
-When a stored recipient address is empty, Msgvault also checks the original
-message's raw To and Cc headers. Multiple matching identities require
+destination identity found in the parent's archived To, Cc, or Bcc recipients
+combined with every original To and Cc header, including when legacy recipient
+snapshots are missing. Multiple matching identities require
 `--from` unless the agent's grant allows exactly one of them. A matching
 identity outside the agent's sender grant returns an authorization error.
 With no match, `--from` is optional when exactly one confirmed identity is

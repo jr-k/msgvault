@@ -269,6 +269,47 @@ func TestDraftReplyUsesStructuredRecipientIdentity(t *testing.T) {
 	}
 }
 
+func TestDraftReplyCombinesOriginalRecipientEvidence(t *testing.T) {
+	for _, mode := range []string{"populated snapshot", "repeated To", "repeated Cc"} {
+		t.Run(mode, func(t *testing.T) {
+			requirements, assertions := require.New(t), assert.New(t)
+			f := newDraftReplyFixture(t)
+			requirements.NoError(f.store.AddAccountIdentity(f.source.ID, "shop@example.test", "manual"))
+			setDraftParentRecipient(t, f.store, f.parentID, "to", "shop@example.test")
+			raw, err := f.store.GetMessageRaw(f.parentID)
+			requirements.NoError(err)
+			headers := "To: shop@example.test, " + testutil.IMAPTestUsername
+			if mode != "populated snapshot" {
+				role := strings.TrimPrefix(mode, "repeated ")
+				headers = role + ": shop@example.test\r\n" + role + ": " + testutil.IMAPTestUsername
+				_, err = f.store.DB().Exec(f.store.Rebind("UPDATE message_recipients SET email_address = NULL WHERE message_id = ?"), f.parentID)
+				requirements.NoError(err)
+			}
+			raw = bytes.Replace(raw, []byte("To: shop@example.test"), []byte(headers), 1)
+			requirements.Contains(string(raw), headers)
+			requirements.NoError(f.store.UpsertMessageRaw(f.parentID, raw))
+			recipients, err := f.store.GetMessageRecipientsContext(t.Context(), f.parentID, "to")
+			requirements.NoError(err)
+			requirements.Len(recipients, 1)
+			if mode == "populated snapshot" {
+				assertions.Equal("shop@example.test", recipients[0].EnvelopeAddress)
+			} else {
+				assertions.Empty(recipients[0].EnvelopeAddress)
+			}
+			adapter := f.grantedAdapter()
+			calls := 0
+			adapter.draftClientFactory = func(context.Context, *store.Source) (*imaplib.Client, error) {
+				calls++
+				return nil, errors.New("unexpected provider call")
+			}
+			events, err := f.runInferred(t, adapter, nil, "--body", "reply")
+			requirements.EqualError(err, "from_ambiguous")
+			assertions.Empty(events)
+			assertions.Zero(calls)
+		})
+	}
+}
+
 func TestDraftReplyInferredSenderSourceIsolation(t *testing.T) {
 	requirements, assertions := require.New(t), assert.New(t)
 	f := newDraftReplyFixture(t)
