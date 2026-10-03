@@ -149,10 +149,10 @@ func scanProse(text string, origins []string, exact map[string]bool) []Ref {
 	seen := make(map[string]bool)
 	var refs []Ref
 	for _, token := range tokens.FindAllString(text, -1) {
-		for len(token) > 0 && !exact[token] && strings.ContainsAny(token[len(token)-1:], ".,;:!?)]}'") {
+		for len(token) > 0 && (len(token) > 8192 || !exact[token]) && strings.ContainsAny(token[len(token)-1:], ".,;:!?)]}'") {
 			token = token[:len(token)-1]
 		}
-		if exact[token] {
+		if len(token) <= 8192 && exact[token] {
 			continue
 		}
 		if r, ok := admit(token, allowed); ok && !seen[r.RouteKey] {

@@ -155,12 +155,14 @@ func TestRecordingReferenceFeedHTML(t *testing.T) {
 func TestRecordingReferenceFeedHTMLVisibleURL(t *testing.T) {
 	for _, tc := range []struct {
 		name, href, before, after string
+		extraAnchors              int
 	}{
-		{"exact", "https://cap.so/s/abc!", "", ""},
-		{"period", "https://cap.so/s/abc!", "", "."},
-		{"parenthesized", "https://cap.so/s/abc!", "(", ")"},
-		{"parenthesis ID", "https://cap.so/s/abc)", "", "."},
-		{"parenthesized parenthesis ID", "https://cap.so/s/abc)", "(", ")"},
+		{"exact", "https://cap.so/s/abc!", "", "", 0},
+		{"period", "https://cap.so/s/abc!", "", ".", 0},
+		{"parenthesized", "https://cap.so/s/abc!", "(", ")", 0},
+		{"parenthesis ID", "https://cap.so/s/abc)", "", ".", 0},
+		{"parenthesized parenthesis ID", "https://cap.so/s/abc)", "(", ")", 0},
+		{"long suffix", "https://cap.so/s/abc!", "", strings.Repeat(".", 1<<20), 8},
 	} {
 		for _, htmlOnly := range []bool{false, true} {
 			t.Run(tc.name+"/htmlOnly="+strconv.FormatBool(htmlOnly), func(t *testing.T) {
@@ -169,18 +171,30 @@ func TestRecordingReferenceFeedHTMLVisibleURL(t *testing.T) {
 				id := f.CreateMessage("html-visible-url")
 				visible := tc.before + tc.href + tc.after
 				text := sql.NullString{String: visible + " https://cap.so/s/other", Valid: true}
+				body := tc.before + `<a href="` + tc.href + `">` + tc.href + `</a>` + tc.after + " https://cap.so/s/other"
+				want := []string{tc.href, "https://cap.so/s/other"}
+				var anchors strings.Builder
+				for i := range tc.extraAnchors {
+					href := "https://cap.so/s/extra" + strconv.Itoa(i)
+					anchors.WriteString(` <a href="` + href + `">recording</a>`)
+					want = append(want, href)
+				}
+				body += anchors.String()
+				text.String += strings.Repeat(" recording", tc.extraAnchors)
 				if htmlOnly {
 					text = sql.NullString{}
 				}
-				body := tc.before + `<a href="` + tc.href + `">` + tc.href + `</a>` + tc.after + " https://cap.so/s/other"
 				require.NoError(f.Store.UpsertMessageBody(id, text, sql.NullString{String: body, Valid: true}))
 				m, found, err := f.Store.ReadRecordingMessage(t.Context(), id)
 				require.NoError(err)
 				require.True(found)
 				refs := messageRefs(m, nil)
-				require.Len(refs, 2)
-				assert.ElementsMatch([]string{tc.href, "https://cap.so/s/other"}, []string{refs[0].Reference, refs[1].Reference})
-				requests := make(chan string, 5)
+				var got []string
+				for _, ref := range refs {
+					got = append(got, ref.Reference)
+				}
+				assert.ElementsMatch(want, got)
+				requests := make(chan string, len(want)+1)
 				client := recordingClient(t, func(w http.ResponseWriter, r *http.Request) {
 					var req docbankmedia.ReferenceRequest
 					if !assert.NoError(json.UnmarshalRead(r.Body, &req)) {
@@ -190,9 +204,13 @@ func TestRecordingReferenceFeedHTMLVisibleURL(t *testing.T) {
 					writeReceipt(w, req.OperationID)
 				})
 				w := NewWorker(f.Store, client, "destination", nil, nil)
-				runDiscovery(t, w, 2)
-				require.Len(requests, 2)
-				assert.ElementsMatch([]string{tc.href, "https://cap.so/s/other"}, []string{<-requests, <-requests})
+				runDiscovery(t, w, len(want))
+				require.Len(requests, len(want))
+				got = nil
+				for range want {
+					got = append(got, <-requests)
+				}
+				assert.ElementsMatch(want, got)
 				savedText, savedHTML := f.GetMessageBody(id)
 				assert.Equal(text, savedText)
 				assert.Equal(body, savedHTML.String)
@@ -203,7 +221,7 @@ func TestRecordingReferenceFeedHTMLVisibleURL(t *testing.T) {
 						text.String += " " + independent
 					}
 					require.NoError(f.Store.UpsertMessageBody(id, text, sql.NullString{String: body, Valid: true}))
-					runDiscovery(t, w, 3+i)
+					runDiscovery(t, w, len(want)+1+i)
 					require.Len(requests, 1)
 					assert.Equal(independent, <-requests)
 				}
