@@ -230,11 +230,30 @@ func confirmedDraftIdentities(identities []store.AccountIdentity) (map[string]st
 
 func (a *storeAPIAdapter) selectDraftSender(
 	identities []store.AccountIdentity,
+	parentRecipients []store.MessageRecipient,
 	requested string,
 	grant *agentgrant.Grant,
 	source *store.Source,
 ) (string, []string, error) {
 	eligible, selfAddresses := confirmedDraftIdentities(identities)
+	if requested == "" {
+		matches := make(map[string]string)
+		for _, recipient := range parentRecipients {
+			_, key, err := parseDraftSender(recipient.EmailAddress)
+			if err != nil {
+				continue
+			}
+			if value, ok := eligible[key]; ok {
+				matches[key] = value
+			}
+		}
+		if len(matches) > 1 {
+			return "", nil, draftReplyError("from_ambiguous", errors.New("--from is required when the parent addresses multiple confirmed identities"))
+		}
+		for _, value := range matches {
+			requested = value
+		}
+	}
 	ref := draftSourceRef(source)
 	if requested != "" {
 		address, key, err := parseDraftSender(requested)
@@ -269,8 +288,7 @@ func (a *storeAPIAdapter) selectDraftSender(
 	return candidates[0], selfAddresses, nil
 }
 
-// resolveDraftTarget performs source, grant, sender, policy, and provider
-// configuration checks before it reads an archived parent or opens IMAP.
+// Source authorization precedes recipient reads; sender and provider checks precede parent MIME and IMAP.
 func (a *storeAPIAdapter) resolveDraftTarget(
 	ctx context.Context,
 	parentID *int64,
@@ -279,6 +297,7 @@ func (a *storeAPIAdapter) resolveDraftTarget(
 	sourceIDSet bool,
 	requestedFrom string,
 	grant *agentgrant.Grant,
+	inferReplySender bool,
 ) (draftReplyTarget, string, []string, error) {
 	var parentSource *store.Source
 	if parentID != nil {
@@ -322,7 +341,17 @@ func (a *storeAPIAdapter) resolveDraftTarget(
 	if err != nil {
 		return draftReplyTarget{}, "", nil, draftReplyError("invalid_from", fmt.Errorf("list identities for source %d: %w", source.ID, err))
 	}
-	from, selfAddresses, err := a.selectDraftSender(identities, requestedFrom, grant, source)
+	var parentRecipients []store.MessageRecipient
+	if inferReplySender && parentID != nil && requestedFrom == "" {
+		for _, role := range []string{"to", "cc", "bcc"} {
+			recipients, err := a.store.GetMessageRecipientsContext(ctx, *parentID, role)
+			if err != nil {
+				return draftReplyTarget{}, "", nil, draftReplyError("invalid_parent", fmt.Errorf("load parent %s recipients: %w", role, err))
+			}
+			parentRecipients = append(parentRecipients, recipients...)
+		}
+	}
+	from, selfAddresses, err := a.selectDraftSender(identities, parentRecipients, requestedFrom, grant, source)
 	if err != nil {
 		return draftReplyTarget{}, "", nil, err
 	}
@@ -389,7 +418,7 @@ func (a *storeAPIAdapter) runCLIReplyDraft(
 	}
 	target, from, selfAddresses, err := a.resolveDraftTarget(
 		ctx, &intent.MessageID, intent.Account, intent.SourceID, intent.SourceIDSet,
-		intent.From, req.Grant,
+		intent.From, req.Grant, true,
 	)
 	if err != nil {
 		return err
