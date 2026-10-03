@@ -24,7 +24,7 @@ type Worker struct {
 	gate        func(context.Context) (func(), bool)
 }
 
-type Result struct{ Examined, Pages, Delivered int }
+type Result struct{ Examined, Pages, Attempted int }
 
 func NewWorker(st *store.Store, client *docbankmedia.Client, destination string, origins []string, logger *slog.Logger) *Worker {
 	canonical := make([]string, 0, len(origins))
@@ -169,10 +169,10 @@ func (w *Worker) RunBatch(ctx context.Context) (Result, error) {
 		if err := w.deliver(ctx, claim); err != nil {
 			return result, err
 		}
-		result.Delivered++
+		result.Attempted++
 	}
 	if w.logger != nil {
-		w.logger.Debug("Recording reference pass", "examined", result.Examined, "pages", result.Pages, "delivered", result.Delivered)
+		w.logger.Debug("Recording reference pass", "examined", result.Examined, "pages", result.Pages, "attempted", result.Attempted)
 	}
 	return result, nil
 }

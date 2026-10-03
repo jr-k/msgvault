@@ -124,7 +124,7 @@ type RecordingReferenceClaim struct {
 	DestinationKey                string
 	MessageID                     int64
 	OperationID, State, ErrorCode string
-	NextActionAt, UpdatedAt       time.Time
+	NextActionAt                  time.Time
 	LastSendAt                    *time.Time
 	RetryCount                    int
 }
@@ -194,7 +194,7 @@ func (s *Store) ReconcileRecordingReferences(ctx context.Context, destination st
 }
 
 func (s *Store) ClaimRecordingReferences(ctx context.Context, destination string, now time.Time, limit int) ([]RecordingReferenceClaim, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT message_id,route_key,kind,origin,ref_sha256,operation_id,occurrence_json,state,next_action_at,error_code,last_send_at,retry_count,updated_at FROM recording_references WHERE destination_key=? AND state IN ('pending','uncertain') AND next_action_at<=? ORDER BY next_action_at,message_id,route_key LIMIT ?`, destination, s.dialect.TimestampParam(now), limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT message_id,route_key,kind,origin,ref_sha256,operation_id,occurrence_json,state,next_action_at,error_code,last_send_at,retry_count FROM recording_references WHERE destination_key=? AND state IN ('pending','uncertain') AND next_action_at<=? ORDER BY next_action_at,message_id,route_key LIMIT ?`, destination, s.dialect.TimestampParam(now), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -202,12 +202,12 @@ func (s *Store) ClaimRecordingReferences(ctx context.Context, destination string
 	var claims []RecordingReferenceClaim
 	for rows.Next() {
 		c := RecordingReferenceClaim{DestinationKey: destination}
-		var next, updated requiredTimestamp
+		var next requiredTimestamp
 		var sent nullableTimestamp
-		if err := rows.Scan(&c.MessageID, &c.RouteKey, &c.Kind, &c.Origin, &c.RefSHA256, &c.OperationID, &c.OccurrenceJSON, &c.State, &next, &c.ErrorCode, &sent, &c.RetryCount, &updated); err != nil {
+		if err := rows.Scan(&c.MessageID, &c.RouteKey, &c.Kind, &c.Origin, &c.RefSHA256, &c.OperationID, &c.OccurrenceJSON, &c.State, &next, &c.ErrorCode, &sent, &c.RetryCount); err != nil {
 			return nil, err
 		}
-		c.NextActionAt, c.UpdatedAt, c.LastSendAt = next.Time, updated.Time, optionalTimestamp(sent)
+		c.NextActionAt, c.LastSendAt = next.Time, optionalTimestamp(sent)
 		claims = append(claims, c)
 	}
 	return claims, rows.Err()
