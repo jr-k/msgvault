@@ -2,6 +2,7 @@
 package recordingref
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/net/html"
 	"golang.org/x/net/idna"
 )
 
@@ -37,7 +39,7 @@ func digest(value string) string {
 func (r Ref) ReferenceSHA256() string { return digest(r.Reference) }
 
 var tokens = regexp.MustCompile(`(?i)https?://[^\s<>"\x60]+`)
-var recordingPath = regexp.MustCompile(`^/(share|embed|s|dev)/([A-Za-z0-9_-]{1,128})$`)
+var recordingPath = regexp.MustCompile(`^/(share|embed|s|dev)/([^/]+)$`)
 
 func parse(raw string) (*url.URL, error) {
 	if len(raw) > 8192 {
@@ -106,7 +108,7 @@ func Scan(text string, origins []string) []Ref {
 			continue
 		}
 		path := recordingPath.FindStringSubmatch(u.EscapedPath())
-		if path == nil {
+		if path == nil || u.EscapedPath() != u.Path {
 			continue
 		}
 		origin := u.Scheme + "://" + u.Host
@@ -139,6 +141,33 @@ func Scan(text string, origins []string) []Ref {
 		}
 	}
 	return refs
+}
+
+// ScanHTML sends archived anchor targets through the same offline admission rule.
+func ScanHTML(body string, origins []string) []Ref {
+	z := html.NewTokenizer(strings.NewReader(body))
+	var refs []Ref
+	for {
+		switch z.Next() {
+		case html.ErrorToken:
+			return refs
+		case html.TextToken, html.EndTagToken, html.CommentToken, html.DoctypeToken:
+			continue
+		case html.StartTagToken, html.SelfClosingTagToken:
+			name, more := z.TagName()
+			if !bytes.EqualFold(name, []byte("a")) {
+				continue
+			}
+			for more {
+				key, value, next := z.TagAttr()
+				more = next
+				if bytes.EqualFold(key, []byte("href")) {
+					refs = append(refs, Scan(string(value), origins)...)
+					break
+				}
+			}
+		}
+	}
 }
 
 func TeamsPointer(sourceAttachmentID, storagePath string) (Ref, bool) {

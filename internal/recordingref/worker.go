@@ -59,6 +59,12 @@ func messageRefs(m store.RecordingMessage, origins []string) []Ref {
 	for _, r := range refs {
 		seen[r.RouteKey] = true
 	}
+	for _, r := range ScanHTML(m.BodyHTML, origins) {
+		if !seen[r.RouteKey] {
+			refs = append(refs, r)
+			seen[r.RouteKey] = true
+		}
+	}
 	for _, p := range m.Pointers {
 		if r, ok := TeamsPointer(p.ID, p.Path); ok && !seen[r.RouteKey] {
 			refs = append(refs, r)
@@ -194,12 +200,31 @@ func (w *Worker) deliver(ctx context.Context, claim store.RecordingReferenceClai
 	var err error
 	requestCtx, cancel := context.WithTimeout(ctx, referenceRequestTimeout)
 	defer cancel()
+	recoverReceipt := claim.State == "uncertain" && (!rebuildable || strings.HasPrefix(claim.ErrorCode, "receipt_"))
+	if claim.State == "uncertain" {
+		switch claim.ErrorCode {
+		case "unauthorized", "forbidden", "validation", "bad_request", "conflict", "not_found", "http_error":
+			recoverReceipt = true
+		}
+	}
 	switch {
-	case rebuildable:
+	case rebuildable && !recoverReceipt:
 		var occurrence docbankmedia.Occurrence
 		if err := json.Unmarshal([]byte(claim.OccurrenceJSON), &occurrence); err != nil {
 			return errors.New("invalid recording reference occurrence")
 		}
+		var marked bool
+		if err := w.gated(ctx, func() error {
+			var err error
+			marked, err = w.st.MarkRecordingReferenceSending(ctx, claim, now)
+			return err
+		}); err != nil {
+			return err
+		}
+		if !marked {
+			return nil
+		}
+		result.State, result.LastSendAt = "uncertain", &now
 		receipt, err = w.client.SubmitReference(requestCtx, docbankmedia.ReferenceRequest{OperationID: claim.OperationID, ReferenceURL: ref.Reference, CanonicalURL: ref.Canonical, Acquire: false, Occurrence: occurrence})
 		if err == nil {
 			result.State = "retained"
@@ -209,34 +234,39 @@ func (w *Worker) deliver(ctx context.Context, claim store.RecordingReferenceClai
 			httpErr, isHTTP := errors.AsType[*docbankmedia.HTTPError](err)
 			switch {
 			case errors.Is(err, docbankmedia.ErrCredentialUnavailable), errors.Is(err, docbankmedia.ErrInvalidRequest):
-				result.State = "pending"
+				result.LastSendAt = claim.LastSendAt
+				if claim.State != "uncertain" {
+					result.State = "pending"
+				}
 			case result.ErrorCode == "capability_unavailable":
-				result.State = "pending"
 				delay := 5 * time.Minute
 				for n := 1; n < result.RetryCount && delay < time.Hour; n++ {
 					delay *= 2
 				}
 				result.NextActionAt = now.Add(min(delay, time.Hour))
-			case isHTTP && httpErr.Retryable():
-				result.State = "pending"
-			case isHTTP:
-				result.State = "blocked"
-			default:
-				result.State = "uncertain"
-				result.LastSendAt = &now
-			}
-			if claim.State == "uncertain" && (result.State != "blocked" || claim.LastSendAt == nil || now.Before(claim.LastSendAt.Add(referenceRequestTimeout+5*time.Minute))) {
-				result.State = "uncertain"
+			case isHTTP && !httpErr.Retryable():
+				if claim.State != "uncertain" {
+					result.State = "blocked"
+				}
 			}
 		}
-	case claim.State == "uncertain":
+	case recoverReceipt:
 		receipt, err = w.client.OperationReceipt(requestCtx, claim.OperationID)
 		if err == nil {
 			result.State = "withdrawn"
+			if rebuildable {
+				result.State = "retained"
+			}
 		} else {
 			result.ErrorCode = docbankmedia.ErrorCode(err)
+			if !docbankmedia.IsNotFound(err) {
+				result.ErrorCode = "receipt_" + result.ErrorCode
+			}
 			if docbankmedia.IsNotFound(err) && claim.LastSendAt != nil && !now.Before(claim.LastSendAt.Add(referenceRequestTimeout+5*time.Minute)) {
 				result.State, result.ErrorCode = "withdrawn", "receipt_not_found"
+				if rebuildable {
+					result.State = "blocked"
+				}
 			}
 		}
 	default:

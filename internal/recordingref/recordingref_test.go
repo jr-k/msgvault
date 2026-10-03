@@ -25,6 +25,10 @@ func TestScan(t *testing.T) {
 		{"port", "https://loom.com:444/share/abc", nil, "", 0},
 		{"long", "https://loom.com/share/" + strings.Repeat("a", 8192), nil, "", 0},
 		{"encoded path", "https://loom.com/share/%61bc", nil, "", 0},
+		{"long ID", "https://loom.com/share/" + strings.Repeat("a", 256), nil, Loom, 1},
+		{"punctuated ID", "https://cap.so/s/abc+def.ghi", nil, CapCloud, 1},
+		{"empty ID", "https://loom.com/share/", nil, "", 0},
+		{"multiple segments", "https://cap.so/s/abc/def", nil, "", 0},
 		{"deduplicate", "https://loom.com/share/abc https://www.loom.com/share/abc", nil, Loom, 1},
 		{"route identity", "https://loom.com/share/abc https://www.loom.com/embed/abc", nil, Loom, 2},
 	} {

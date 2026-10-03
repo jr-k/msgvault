@@ -67,11 +67,11 @@ func (s *Store) AdvanceRecordingReferenceCursor(ctx context.Context, destination
 
 type RecordingPointer struct{ ID, Path string }
 type RecordingMessage struct {
-	ID                                                              int64
-	ArchiveUID, SourceType, SourceIdentifier, SourceMessageID, Body string
-	SentAt                                                          *time.Time
-	Live                                                            bool
-	Pointers                                                        []RecordingPointer
+	ID                                                                        int64
+	ArchiveUID, SourceType, SourceIdentifier, SourceMessageID, Body, BodyHTML string
+	SentAt                                                                    *time.Time
+	Live                                                                      bool
+	Pointers                                                                  []RecordingPointer
 }
 
 func (s *Store) ReadRecordingMessage(ctx context.Context, messageID int64) (RecordingMessage, bool, error) {
@@ -98,6 +98,7 @@ func (s *Store) ReadRecordingMessage(ctx context.Context, messageID int64) (Reco
 		return m, false, err
 	}
 	m.Body = embeddingBodyValue(text, html)
+	m.BodyHTML = nullStringValue(html)
 	rows, err := s.db.QueryContext(ctx, `SELECT source_attachment_id, storage_path FROM attachments WHERE message_id=? AND source_attachment_id LIKE 'teams:recording:%' ORDER BY id`, messageID)
 	if err != nil {
 		return m, false, err
@@ -210,6 +211,16 @@ func (s *Store) ClaimRecordingReferences(ctx context.Context, destination string
 		claims = append(claims, c)
 	}
 	return claims, rows.Err()
+}
+
+// MarkRecordingReferenceSending commits recoverable state before network work.
+func (s *Store) MarkRecordingReferenceSending(ctx context.Context, claim RecordingReferenceClaim, sentAt time.Time) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE recording_references SET state='uncertain',last_send_at=?,next_action_at=?,updated_at=? WHERE destination_key=? AND message_id=? AND route_key=? AND operation_id=? AND state=?`, s.dialect.TimestampParam(sentAt), s.dialect.TimestampParam(sentAt.Add(5*time.Minute)), s.dialect.TimestampParam(sentAt), claim.DestinationKey, claim.MessageID, claim.RouteKey, claim.OperationID, claim.State)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 func (s *Store) FinishRecordingReference(ctx context.Context, claim RecordingReferenceClaim, result RecordingReferenceResult) (bool, error) {

@@ -63,6 +63,9 @@ func TestRecordingReferenceState(t *testing.T) {
 	ok, err = f.Store.FinishRecordingReference(t.Context(), first, store.RecordingReferenceResult{State: "retained", NextActionAt: now})
 	require.NoError(err)
 	assert.False(ok)
+	ok, err = f.Store.MarkRecordingReferenceSending(t.Context(), first, now)
+	require.NoError(err)
+	assert.False(ok)
 	before, err := f.Store.LoadRecordingReferenceCursor(t.Context(), "destination")
 	require.NoError(err)
 	after := store.RecordingReferenceCursor{At: now, AfterID: id, AfterRow: true, Policy: "policy"}

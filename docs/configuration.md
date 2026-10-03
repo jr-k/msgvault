@@ -1046,7 +1046,8 @@ all_sources_upload_consent = true # allow audio from every captured source to le
 | `reference_origins` | `[]` | Exact origins for self-hosted Cap, such as `https://cap.example.test`. Include only scheme, host and optional port. Register each origin in Docbank too. |
 
 With `enabled = true` and `reference_consent = true`, the daemon routes Loom,
-Cap and Teams recording links in the background, including existing messages.
+Cap and Teams recording links in the background, including existing messages
+and HTML links behind display text.
 It submits references with acquisition disabled. Docbank records outcome
 `access_required` or `unsupported`. Coverage stays `unprocessed` until media is imported.
 Delivery log events include Docbank's
