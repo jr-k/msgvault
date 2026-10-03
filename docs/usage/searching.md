@@ -80,8 +80,11 @@ address and calendar events of that calendar.
 - msgvault picks one account per message from its delivery headers, then its
   confirmed To/Cc recipients, then the source's own mailbox. When two confirmed
   addresses tie, the message has no account and neither operator finds it.
-- `received:` excludes sent copies and calendar events. A message counts as
-  sent only when the provider filed it under Sent.
+- `received:` excludes sent copies, drafts and calendar events. A message
+  counts as sent only when the provider filed it under Sent or Drafts.
+- `--account` selects a whole archive source. `account:` matches only messages
+  attributed to the address, so mail forwarded into a personal source matches
+  `account:work@example.org` but not `--account work@example.org`.
 - Repeating one operator matches any of the values; using both requires both.
 - Mail archived by an older version fills in on the source's next sync, or
   right away with [`msgvault repair-derived`](../cli-reference.md#repair-derived).
