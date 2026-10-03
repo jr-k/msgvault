@@ -34,8 +34,8 @@ func (h *countingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func newTelemetryTestServer(t *testing.T, apiKey string) (*Server, *countingHandler) {
 	t.Helper()
-	reporter, err := telemetry.NewReporter(telemetry.Options{DataDir: t.TempDir()})
-	require.NoError(t, err)
+	// Config-off reporter: allowlisted events answer "disabled" and nothing is sent.
+	reporter := telemetry.NewReporterOrDisabled(telemetry.Options{DataDir: t.TempDir()}, testLogger())
 	capture := &countingHandler{next: telemetry.CaptureHandler(reporter)}
 	srv := NewServerWithOptions(ServerOptions{
 		Config:           &config.Config{Server: config.ServerConfig{APIKey: apiKey}},
@@ -89,31 +89,27 @@ func TestTelemetryEventRouteKeylessLoopback(t *testing.T) {
 		assert.Equal(http.StatusBadRequest, resp.Code, "event %s: %s", event, resp.Body.String())
 	}
 
-	atCap := serveTelemetry(srv, telemetryRequest(paddedAppOpened(t, maxTelemetryEventRequestBytes), "application/json"))
-	assert.Equal(http.StatusAccepted, atCap.Code, "body of exactly %d bytes", maxTelemetryEventRequestBytes)
+	const kitBodyCap = 64 << 10
+	atCap := serveTelemetry(srv, telemetryRequest(paddedAppOpened(t, kitBodyCap), "application/json"))
+	assert.Equal(http.StatusAccepted, atCap.Code, "body of exactly %d bytes", kitBodyCap)
 
-	before := capture.calls.Load()
-	overCap := paddedAppOpened(t, maxTelemetryEventRequestBytes+1)
-	unknownLength := telemetryRequest(overCap, "application/json")
-	unknownLength.ContentLength = -1
-	whitespace := append([]byte(appOpenedBody), bytes.Repeat([]byte(" "), maxTelemetryEventRequestBytes)...)
 	rejections := []struct {
 		name   string
-		req    *http.Request
+		body   []byte
 		status int
 	}{
-		{"text/plain content type", telemetryRequest([]byte(appOpenedBody), "text/plain"), http.StatusUnsupportedMediaType},
-		{"one byte over the cap", telemetryRequest(overCap, "application/json"), http.StatusBadRequest},
-		{"whitespace past the cap", telemetryRequest(whitespace, "application/json"), http.StatusBadRequest},
-		{"second JSON value", telemetryRequest([]byte(appOpenedBody+appOpenedBody), "application/json"), http.StatusBadRequest},
-		{"trailing junk", telemetryRequest([]byte(appOpenedBody+"junk"), "application/json"), http.StatusBadRequest},
-		{"over the cap with unknown length", unknownLength, http.StatusBadRequest},
+		{"one byte over the cap", paddedAppOpened(t, kitBodyCap+1), http.StatusRequestEntityTooLarge},
+		{"second JSON value", []byte(appOpenedBody + appOpenedBody), http.StatusBadRequest},
+		{"trailing junk", []byte(appOpenedBody + "junk"), http.StatusBadRequest},
 	}
 	for _, tc := range rejections {
-		resp := serveTelemetry(srv, tc.req)
+		resp := serveTelemetry(srv, telemetryRequest(tc.body, "application/json"))
 		assert.Equal(tc.status, resp.Code, "%s: %s", tc.name, resp.Body.String())
 	}
-	assert.Equal(before, capture.calls.Load(), "rejected bodies must never reach the capture handler")
+	before := capture.calls.Load()
+	plain := serveTelemetry(srv, telemetryRequest([]byte(appOpenedBody), "text/plain"))
+	assert.Equal(http.StatusUnsupportedMediaType, plain.Code, plain.Body.String())
+	assert.Equal(before, capture.calls.Load(), "a non-JSON content type must never reach the capture handler")
 }
 
 func TestTelemetryEventRouteAuthentication(t *testing.T) {
@@ -192,8 +188,7 @@ func TestTelemetryEventRouteBypassesHeldOperationGate(t *testing.T) { //nolint:p
 	require.True(ok, "occupy gate")
 	defer release()
 
-	reporter, err := telemetry.NewReporter(telemetry.Options{DataDir: t.TempDir()})
-	require.NoError(err)
+	reporter := telemetry.NewReporterOrDisabled(telemetry.Options{DataDir: t.TempDir()}, testLogger())
 	srv := NewServerWithOptions(ServerOptions{
 		Config:           &config.Config{Server: config.ServerConfig{APIPort: 8080}},
 		Store:            &gateFilesStore{mockStore: &mockStore{}},

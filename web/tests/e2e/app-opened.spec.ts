@@ -10,6 +10,6 @@ test("logging in reports app_opened through the daemon", async ({ page, daemon }
   const response = await telemetry;
   expect(response.status()).toBe(202);
   expect(await response.json()).toEqual({ status: "disabled" });
-  expect(response.request().postDataJSON()).toEqual({ event: "app_opened" });
+  expect(response.request().postDataJSON()).toEqual({ event: "app_opened", properties: { surface: "web" } });
   expect(response.request().headers()["x-csrf-token"]).toBeTruthy();
 });

@@ -5,18 +5,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"testing"
+	"os"
+	"strings"
 
-	kittelemetry "go.kenn.io/kit/telemetry"
+	"go.kenn.io/kit/telemetry/posthog"
 )
 
 const (
-	// EnabledEnv turns telemetry off when set to 0.
+	// EnabledEnv set to 0 turns telemetry off; any value overrides [telemetry] enabled.
 	EnabledEnv = "MSGVAULT_TELEMETRY_ENABLED"
-	// GenericEnabledEnv is the unprefixed opt-out variable kit also honors.
-	GenericEnabledEnv = kittelemetry.GenericTelemetryEnabledEnv
-	// EventDaemonActive is the daemon heartbeat sent at start and every 24 hours.
-	EventDaemonActive = "daemon_active"
 	// EventAppOpened is reported by the web UI through the daemon.
 	EventAppOpened = "app_opened"
 	application    = "msgvault"
@@ -25,82 +22,63 @@ const (
 	postHogAPIKey = "phc_AzHd9YvuHR7M5poKzC6eW654d3SgKyBdoQPuwkWhimUf" // #nosec G101
 )
 
-// Client is the reporter contract the daemon heartbeat uses.
-type Client = kittelemetry.PostHogClient
-
-// Reporter sanitizes and sends allowlisted events.
-type Reporter = kittelemetry.PostHogReporter
-
 // Options configures the daemon reporter.
 type Options struct {
 	DataDir string
 	Version string
 	Commit  string
+	// ConfigEnabled is [telemetry] enabled; a set EnabledEnv wins over it.
+	ConfigEnabled bool
 }
 
-// EnabledFromEnv reports whether the environment leaves telemetry on.
-func EnabledFromEnv() bool {
-	return kittelemetry.PostHogTelemetryEnabledFromEnv(envPrefix)
+// NewReporterOrDisabled builds the reporter, logging that telemetry is on and
+// how to turn it off. When it can't build one it logs why and returns kit's
+// disabled reporter so startup continues.
+func NewReporterOrDisabled(opts Options, logger *slog.Logger) *posthog.Reporter {
+	return newReporterOrDisabled(opts, "", logger)
 }
 
-// NewReporter builds an enabled reporter, or an opted-out one that keeps the allowlist.
-func NewReporter(opts Options) (*Reporter, error) {
-	if testing.Testing() {
-		// go test never sends; kit's opted-out reporter still admits allowlisted events.
-		kittelemetry.DisablePostHogTelemetry()
-	}
-	return buildReporter(opts, "")
-}
-
-// NewReporterOrDisabled builds the reporter, or logs why it could not and
-// returns kit's disabled reporter so startup continues.
-func NewReporterOrDisabled(opts Options, logger *slog.Logger) *Reporter {
-	reporter, err := NewReporter(opts)
+// newReporterOrDisabled takes the endpoint so the helper-process test can point the enabled path at a stub; production passes "".
+func newReporterOrDisabled(opts Options, endpoint string, logger *slog.Logger) *posthog.Reporter {
+	reporter, err := buildReporter(opts, endpoint)
 	if err != nil {
-		if logger != nil {
-			logger.Warn("telemetry disabled", "error", err)
-		}
-		return DisabledReporter()
+		logger.Warn("telemetry disabled", "error", err)
+		return posthog.DisabledReporter()
+	}
+	if reporter.Enabled() {
+		logger.Info("anonymous telemetry is on; set [telemetry] enabled = false in config.toml or " + EnabledEnv + "=0 to turn it off")
 	}
 	return reporter
 }
 
-// DisabledReporter returns a reporter that admits and sends nothing.
-func DisabledReporter() *Reporter {
-	return kittelemetry.DisabledPostHogReporter()
-}
-
 // CaptureHandler serves the web UI's event posts through reporter. A nil reporter admits no event.
-func CaptureHandler(reporter *Reporter) http.Handler {
-	return kittelemetry.NewPostHogCaptureHandler(reporter)
+func CaptureHandler(reporter *posthog.Reporter) http.Handler {
+	return posthog.NewCaptureHandler(reporter)
 }
 
-// buildReporter takes the endpoint so the helper-process test can point the enabled path at a stub; production passes "".
-func buildReporter(opts Options, endpoint string) (*Reporter, error) {
-	if !EnabledFromEnv() {
-		reporter, err := kittelemetry.NewPostHogReporter(kittelemetry.PostHogOptions{EnvPrefix: envPrefix}, allowedEventOptions()...)
-		if err != nil {
-			return nil, fmt.Errorf("build opted-out telemetry reporter: %w", err)
-		}
-		return reporter, nil
+func buildReporter(opts Options, endpoint string) (*posthog.Reporter, error) {
+	allowed := []posthog.Option{
+		posthog.WithAllowedEvent(posthog.EventDaemonActive),
+		posthog.WithAllowedEvent(EventAppOpened),
 	}
-	id, installedAt, err := loadOrCreateInstall(opts.DataDir)
-	if err != nil {
-		return nil, err
+	if strings.TrimSpace(os.Getenv(EnabledEnv)) == "" && !opts.ConfigEnabled {
+		// Only the daemon reports, so the process-wide switch is this reporter's switch.
+		posthog.DisableProcess()
 	}
-	reporter, err := kittelemetry.NewPostHogReporter(kittelemetry.PostHogOptions{
+	options := posthog.Options{
 		APIKey: postHogAPIKey, Endpoint: endpoint, Application: application, EnvPrefix: envPrefix,
-		DistinctID: id, InstalledAt: installedAt, Version: opts.Version, Commit: opts.Commit, Source: "daemon",
-	}, allowedEventOptions()...)
+		Version: opts.Version, Commit: opts.Commit, Source: "daemon",
+	}
+	if posthog.EnabledFromEnv(envPrefix) {
+		install, err := posthog.LoadOrCreateInstall(opts.DataDir)
+		if err != nil {
+			return nil, fmt.Errorf("load telemetry install: %w", err)
+		}
+		options.DistinctID, options.InstalledAt = install.ID, install.InstalledAt
+	}
+	reporter, err := posthog.NewReporter(options, allowed...)
 	if err != nil {
 		return nil, fmt.Errorf("build telemetry reporter: %w", err)
 	}
 	return reporter, nil
-}
-
-func allowedEventOptions() []kittelemetry.PostHogOption {
-	return []kittelemetry.PostHogOption{
-		kittelemetry.WithAllowedEvent(EventDaemonActive),
-		kittelemetry.WithAllowedEvent(EventAppOpened),
-	}
 }

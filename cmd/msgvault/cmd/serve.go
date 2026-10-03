@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.kenn.io/kit/telemetry/posthog"
 	"go.kenn.io/msgvault/internal/api"
 	"go.kenn.io/msgvault/internal/carddav"
 	"go.kenn.io/msgvault/internal/circleback"
@@ -251,14 +252,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}()
 	telemetryReporter := telemetry.NewReporterOrDisabled(telemetry.Options{
 		DataDir: cfg.Data.DataDir, Version: Version, Commit: Commit,
+		ConfigEnabled: cfg.Telemetry.EnabledOrDefault(),
 	}, logger)
-	var stopTelemetryTicker func()
-	telemetryHeartbeatDone := closedTelemetryDone()
 	defer func() {
-		<-telemetryHeartbeatDone
-		if stopTelemetryTicker != nil {
-			stopTelemetryTicker()
-		}
 		if err := telemetryReporter.Close(); err != nil {
 			logger.Warn("close telemetry reporter", "error", err)
 		}
@@ -846,9 +842,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 			combineWorkTrackers(idleTracker, labelWorkTracker(operationGate, "background embedding work")),
 			apiServer, sched, blobStore,
 		)
-		ticker := time.NewTicker(telemetryHeartbeatInterval)
-		stopTelemetryTicker = ticker.Stop
-		telemetryHeartbeatDone = startTelemetryHeartbeat(ctx, telemetryReporter, ticker.C, logger)
+		go posthog.RunHeartbeat(ctx, telemetryReporter, logger)
 
 		fmt.Printf("msgvault daemon started\n")
 		fmt.Printf("  API server: http://%s\n", apiAddr)

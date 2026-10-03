@@ -21,7 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	kittelemetry "go.kenn.io/kit/telemetry"
+	"go.kenn.io/kit/telemetry/posthog"
 	"go.kenn.io/msgvault/internal/agentgrant"
 	"go.kenn.io/msgvault/internal/apiprotocol"
 	"go.kenn.io/msgvault/internal/config"
@@ -675,7 +675,7 @@ func NewServerWithOptions(opts ServerOptions) *Server {
 	})
 	if s.telemetryCapture == nil {
 		// kit's nil-reporter handler admits no event.
-		s.telemetryCapture = kittelemetry.NewPostHogCaptureHandler(nil)
+		s.telemetryCapture = posthog.NewCaptureHandler(nil)
 	}
 	if s.taskIdentityResolver == nil {
 		s.taskIdentityResolver = s.resolveTaskMessageIdentity
