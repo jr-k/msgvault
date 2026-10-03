@@ -519,6 +519,54 @@ func TestAccountAttributionSentEvidenceDecidesDirection(t *testing.T) {
 	assert.Equal(attrSink, address.String)
 }
 
+func TestAccountAttributionDraftsAreNotReceived(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	f := newAttrFixture(t, "gmail", attrSink)
+	f.confirm(attrSink, "alias@example.net")
+	draft, err := f.st.EnsureLabel(f.source.ID, "DRAFT", "DRAFT", "system")
+	require.NoError(err)
+
+	// A header-free draft to an outside address would otherwise fall back to
+	// the source mailbox.
+	external := f.persist(attrMail{
+		raw:  "From: " + attrSink + "\r\nTo: friend@example.com\r\n\r\nbody",
+		from: []string{attrSink}, to: []string{"friend@example.com"}, labels: []int64{draft},
+	})
+	// A draft to a confirmed alias would otherwise match the visible recipient.
+	toAlias := f.persist(attrMail{
+		raw:  "From: " + attrSink + "\r\nTo: alias@example.net\r\n\r\nbody",
+		from: []string{attrSink}, to: []string{"alias@example.net"}, labels: []int64{draft},
+	})
+	assert.Empty(searchIDs(t, f.st, "received:"+attrSink))
+	assert.Empty(searchIDs(t, f.st, "received:alias@example.net"))
+	assert.Equal([]int64{external, toAlias}, searchIDs(t, f.st, "account:"+attrSink), "drafts belong to their author")
+
+	// Sending moves the draft to SENT; it stays out of received:.
+	sent, err := f.st.EnsureLabel(f.source.ID, "SENT", "SENT", "system")
+	require.NoError(err)
+	require.NoError(f.st.AddMessageLabels(external, []int64{sent}))
+	require.NoError(f.st.RemoveMessageLabels(external, []int64{draft}))
+	address, path := attribution(t, f.st, external)
+	assert.Equal(attrSink, address.String)
+	assert.Equal("sent", path.String)
+
+	// An IMAP mailbox that sync later learns is \Drafts re-derives its members.
+	imap := newAttrFixtureOn(t, f.st, "imap", "imaps://"+strings.Replace(attrSink, "@", "%40", 1)+"@mail.example.net:993")
+	imap.confirm(attrSink)
+	labels, err := f.st.EnsureLabelsBatch(imap.source.ID, map[string]store.LabelInfo{
+		"Drafts": {Name: "Drafts", Type: "system"},
+	})
+	require.NoError(err)
+	id := imap.persist(attrMail{raw: "To: friend@example.com\r\n\r\nbody", to: []string{"friend@example.com"}, labels: []int64{labels["Drafts"]}})
+	assert.Contains(searchIDs(t, f.st, "received:"+attrSink), id)
+	_, err = f.st.EnsureLabelsBatch(imap.source.ID, map[string]store.LabelInfo{
+		"Drafts": {Name: "Drafts", Type: "system", SystemRole: store.LabelSystemRoleDrafts},
+	})
+	require.NoError(err)
+	assert.NotContains(searchIDs(t, f.st, "received:"+attrSink), id)
+}
+
 func TestAccountAttributionLabelDefinitionChanges(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -785,11 +833,17 @@ func TestAccountAttributionDraftsAndRelocation(t *testing.T) {
 	}
 	gdraft, err := st.PersistGmailDraftContext(t.Context(), receipt, people, gmailTestBuild(gsource.ID, 0, receipt, []byte(raw)))
 	require.NoError(err)
-	assert.Contains(searchIDs(t, st, "received:work@example.org"), gdraft.CurrentMessageID)
+	assert.NotContains(searchIDs(t, st, "received:work@example.org"), gdraft.CurrentMessageID, "a Gmail draft was never received")
+	_, path := attribution(t, st, gdraft.CurrentMessageID)
+	assert.Equal("sent", path.String)
 
 	isource, err := st.GetOrCreateSource("imap", "imap://alice@example.com:143")
 	require.NoError(err)
 	require.NoError(st.AddAccountIdentity(isource.ID, "work@example.org", "manual"))
+	_, err = st.EnsureLabelsBatch(isource.ID, map[string]store.LabelInfo{
+		"Drafts": {Name: "Drafts", Type: "system", SystemRole: store.LabelSystemRoleDrafts},
+	})
+	require.NoError(err)
 	iconv, err := st.EnsureConversation(isource.ID, "draft-thread", "Draft")
 	require.NoError(err)
 	ireceipt := store.IMAPDraftReceipt{SourceID: isource.ID, Mailbox: "Drafts", UIDValidity: 1, UID: 5}
@@ -803,7 +857,7 @@ func TestAccountAttributionDraftsAndRelocation(t *testing.T) {
 		}
 	})
 	require.NoError(err)
-	assert.Contains(searchIDs(t, st, "received:work@example.org"), idraft.CurrentMessageID)
+	assert.NotContains(searchIDs(t, st, "received:work@example.org"), idraft.CurrentMessageID, "an IMAP draft was never received")
 
 	fixture := seedIMAPRelocationFixture(t)
 	require.NoError(fixture.Store.AddAccountIdentity(fixture.SourceID, "work@example.org", "manual"))

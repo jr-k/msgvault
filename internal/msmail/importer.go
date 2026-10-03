@@ -36,11 +36,11 @@ const retryPrefix = "retry:"
 const fetchWorkers = 4
 
 // systemFolders maps Graph well-known folder names to the label system role
-// they carry. Each one is labelled "system"; only Sent Items has a role.
+// they carry. Each one is labelled "system"; only Sent Items and Drafts have a role.
 var systemFolders = map[string]string{
 	"inbox":        "",
 	"sentitems":    store.LabelSystemRoleSent,
-	"drafts":       "",
+	"drafts":       store.LabelSystemRoleDrafts,
 	"deleteditems": "",
 	"junkemail":    "",
 	"archive":      "",

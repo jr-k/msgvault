@@ -136,7 +136,7 @@ func (s *Store) PersistIMAPDraftContext(
 		if err != nil {
 			return err
 		}
-		if err := s.refreshAccountAttributionIfSentChangedTx(ctx, tx, id, func() error {
+		if err := s.refreshAccountAttributionIfOutboundChangedTx(ctx, tx, id, func() error {
 			return replaceMessageLabelsTx(boundQuerier{ctx: ctx, q: tx}, id, []int64{labelID})
 		}); err != nil {
 			return fmt.Errorf("persist IMAP draft label: %w", err)

@@ -2498,6 +2498,10 @@ type Label struct {
 // represents sent mail. It is deliberately independent of the display name.
 const LabelSystemRoleSent = "sent"
 
+// LabelSystemRoleDrafts identifies a label whose provider metadata confirms it
+// holds unsent drafts.
+const LabelSystemRoleDrafts = "drafts"
+
 // EnsureLabel gets or creates a label, handling renames and ID changes.
 // For batch operations prefer EnsureLabelsBatch which runs in a single
 // transaction.
@@ -2720,10 +2724,10 @@ func (s *Store) EnsureLabelsBatch(
 	return result, nil
 }
 
-// ensureLabelsBatchWith captures the Sent evidence of every label it can
+// ensureLabelsBatchWith captures the outbound evidence of every label it can
 // touch into flips, which the attribution entry applies before commit.
 func ensureLabelsBatchWith(
-	q querier, sourceID int64, labels map[string]LabelInfo, flips *labelSentFlips,
+	q querier, sourceID int64, labels map[string]LabelInfo, flips *labelOutboundFlips,
 ) (map[string]int64, error) {
 	sourceLabelIDs := make([]string, 0, len(labels))
 	names := make([]string, 0, len(labels))
@@ -2771,7 +2775,7 @@ func ensureLabelsBatchWith(
 }
 
 func ensureMessageLabelRefsWith(
-	q querier, sourceID int64, refs []MessageLabelRef, flips *labelSentFlips,
+	q querier, sourceID int64, refs []MessageLabelRef, flips *labelOutboundFlips,
 ) ([]int64, error) {
 	labels := make(map[string]LabelInfo, len(refs))
 	for _, ref := range refs {
@@ -2819,7 +2823,7 @@ func (s *Store) MessageLabelIDsContext(ctx context.Context, messageID int64) ([]
 func (s *Store) ReplaceMessageLabels(messageID int64, labelIDs []int64) error {
 	ctx := context.Background()
 	return s.withMessageAttributionTxContext(ctx, messageID, func(tx *loggedTx) error {
-		return s.refreshAccountAttributionIfSentChangedTx(ctx, tx, messageID, func() error {
+		return s.refreshAccountAttributionIfOutboundChangedTx(ctx, tx, messageID, func() error {
 			return replaceMessageLabelsTx(tx, messageID, labelIDs)
 		})
 	})
@@ -2901,7 +2905,7 @@ func (s *Store) reconcileMessageLabelsTxContext(
 		if !changed {
 			return false, nil
 		}
-		if err := s.refreshAccountAttributionIfSentChangedTx(ctx, tx, messageID, func() error {
+		if err := s.refreshAccountAttributionIfOutboundChangedTx(ctx, tx, messageID, func() error {
 			return replaceMessageLabelsTx(boundQuerier{ctx: ctx, q: tx}, messageID, labelIDs)
 		}); err != nil {
 			return false, err
@@ -2918,7 +2922,7 @@ func (s *Store) reconcileMessageLabelsTxContext(
 	if len(missing) == 0 {
 		return false, nil
 	}
-	if err := s.refreshAccountAttributionIfSentChangedTx(ctx, tx, messageID, func() error {
+	if err := s.refreshAccountAttributionIfOutboundChangedTx(ctx, tx, messageID, func() error {
 		return s.addMessageLabelsTx(boundQuerier{ctx: ctx, q: tx}, messageID, missing)
 	}); err != nil {
 		return false, err
@@ -3008,7 +3012,7 @@ func (s *Store) RemoveMessageLabels(messageID int64, labelIDs []int64) error {
 		if err := s.requireSyncMessageSourceTx(tx, messageID); err != nil {
 			return err
 		}
-		return s.refreshAccountAttributionIfSentChangedTx(ctx, tx, messageID, func() error {
+		return s.refreshAccountAttributionIfOutboundChangedTx(ctx, tx, messageID, func() error {
 			return execInChunks(tx, labelIDs, []any{messageID},
 				`DELETE FROM message_labels WHERE message_id = ? AND label_id IN (%s)`)
 		})

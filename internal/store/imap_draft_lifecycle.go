@@ -346,7 +346,7 @@ func (s *Store) PublishIMAPDraftReplacementContext(
 			if err != nil {
 				return err
 			}
-			if err := s.refreshAccountAttributionIfSentChangedTx(ctx, tx, messageID, func() error {
+			if err := s.refreshAccountAttributionIfOutboundChangedTx(ctx, tx, messageID, func() error {
 				return replaceMessageLabelsTx(boundQuerier{ctx: ctx, q: tx}, messageID, []int64{labelID})
 			}); err != nil {
 				return fmt.Errorf("persist replacement IMAP label: %w", err)
@@ -471,7 +471,7 @@ func (s *Store) retireIMAPDraftMembershipTx(
 		}
 		labelIDs = append(labelIDs, labelID)
 	}
-	if err := s.refreshAccountAttributionIfSentChangedTx(ctx, tx, messageID, func() error {
+	if err := s.refreshAccountAttributionIfOutboundChangedTx(ctx, tx, messageID, func() error {
 		return replaceMessageLabelsTx(boundQuerier{ctx: ctx, q: tx}, messageID, labelIDs)
 	}); err != nil {
 		return fmt.Errorf("rebuild IMAP draft labels: %w", err)

@@ -513,7 +513,7 @@ func (s *Store) MergeDuplicates(
 		}
 	}
 	err := s.withAttributionTxContext(ctx, lock, func(tx *loggedTx) error {
-		sentBefore, err := messageHasSentEvidenceTx(ctx, tx, survivorID)
+		sentBefore, err := messageHasOutboundEvidenceTx(ctx, tx, survivorID)
 		if err != nil {
 			return err
 		}
@@ -560,7 +560,7 @@ func (s *Store) MergeDuplicates(
 			_, err := s.refreshAccountAttributionTx(ctx, tx, survivorID, deliveryInput{reloadMIME: true})
 			return err
 		}
-		sentAfter, err := messageHasSentEvidenceTx(ctx, tx, survivorID)
+		sentAfter, err := messageHasOutboundEvidenceTx(ctx, tx, survivorID)
 		if err != nil || sentAfter == sentBefore {
 			return err
 		}

@@ -54,7 +54,7 @@ type attributionLockState struct {
 	exclusive bool
 	sources   map[int64]struct{}
 	// flips are label-definition changes the entry applies before commit.
-	flips []*labelSentFlips
+	flips []*labelOutboundFlips
 }
 
 func (st *attributionLockState) holds(sourceID int64) bool {
@@ -109,7 +109,7 @@ func (s *Store) withAttributionTxContext(
 			return err
 		}
 		for _, flips := range tx.attribution.flips {
-			if err := s.applyLabelSentFlipsTx(flips); err != nil {
+			if err := s.applyLabelOutboundFlipsTx(flips); err != nil {
 				return err
 			}
 		}
@@ -129,11 +129,11 @@ func attributionLockForMessage(sourceID int64, messageType string) attributionLo
 
 // labelFlipsTx returns a collector the transaction's attribution entry applies
 // before commit, or nil outside an attribution transaction.
-func labelFlipsTx(ctx context.Context, tx *loggedTx, sourceID int64) *labelSentFlips {
+func labelFlipsTx(ctx context.Context, tx *loggedTx, sourceID int64) *labelOutboundFlips {
 	if tx.attribution == nil {
 		return nil
 	}
-	flips := newLabelSentFlips(ctx, tx, sourceID)
+	flips := newLabelOutboundFlips(ctx, tx, sourceID)
 	tx.attribution.flips = append(tx.attribution.flips, flips)
 	return flips
 }
@@ -234,18 +234,20 @@ func sentGmailLabelSQL(l, src string) string {
 	return "(" + src + ".source_type = 'gmail' AND " + l + ".source_label_id = 'SENT')"
 }
 
-// sentEvidenceLabelSQL is true for a label that provider metadata marks as
-// sent mail: a Sent folder role, or Gmail's SENT system label.
-func sentEvidenceLabelSQL(l, src string) string {
-	return "(" + sentFolderLabelSQL(l) + " OR " + sentGmailLabelSQL(l, src) + ")"
+// outboundEvidenceLabelSQL is true for a label that provider metadata marks as
+// mail the account wrote rather than received: a Sent or Drafts folder role,
+// or Gmail's SENT or DRAFT system label.
+func outboundEvidenceLabelSQL(l, src string) string {
+	return "(" + l + ".system_role IN ('" + LabelSystemRoleSent + "', '" + LabelSystemRoleDrafts + "') OR (" +
+		src + ".source_type = 'gmail' AND " + l + ".source_label_id IN ('SENT', 'DRAFT')))"
 }
 
-// sentEvidenceExistsSQL is true when message m carries a Sent label of its
-// own source. src must be m's source row.
-func sentEvidenceExistsSQL(m, src string) string {
+// outboundEvidenceExistsSQL is true when message m carries a Sent or Drafts
+// label of its own source. src must be m's source row.
+func outboundEvidenceExistsSQL(m, src string) string {
 	return `EXISTS (SELECT 1 FROM message_labels ml JOIN labels l ON l.id = ml.label_id
 		WHERE ml.message_id = ` + m + `.id AND l.source_id = ` + m + `.source_id
-		  AND ` + sentEvidenceLabelSQL("l", src) + `)`
+		  AND ` + outboundEvidenceLabelSQL("l", src) + `)`
 }
 
 // accountSink returns the mailbox a source delivers into, normalized, or ""
@@ -425,13 +427,14 @@ func (s *Store) refreshAccountAttributionTx(
 	}
 	match := matches[id]
 
+	// Drafts take the sent path: the account wrote them, so received: skips them.
 	var sent bool
 	if err := tx.QueryRowContext(ctx, `
-		SELECT `+sentEvidenceExistsSQL("m", "src")+`
+		SELECT `+outboundEvidenceExistsSQL("m", "src")+`
 		FROM messages m JOIN sources src ON src.id = m.source_id
 		WHERE m.id = ?`, id,
 	).Scan(&sent); err != nil {
-		return malformed, fmt.Errorf("read sent evidence for message %d: %w", id, err)
+		return malformed, fmt.Errorf("read outbound evidence for message %d: %w", id, err)
 	}
 
 	candidates, err := sourceIdentityKeysTx(ctx, tx, sourceID)
@@ -701,34 +704,34 @@ func (s *Store) refreshCalendarAccountAttributionTx(ctx context.Context, tx *log
 	return s.refreshAccountAttributionForMessagesTx(ctx, tx, ids)
 }
 
-func messageHasSentEvidenceTx(ctx context.Context, tx *loggedTx, messageID int64) (bool, error) {
+func messageHasOutboundEvidenceTx(ctx context.Context, tx *loggedTx, messageID int64) (bool, error) {
 	var sent bool
 	err := tx.QueryRowContext(ctx, `
-		SELECT `+sentEvidenceExistsSQL("m", "src")+`
+		SELECT `+outboundEvidenceExistsSQL("m", "src")+`
 		FROM messages m JOIN sources src ON src.id = m.source_id
 		WHERE m.id = ?`, messageID).Scan(&sent)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read sent evidence for message %d: %w", messageID, err)
+		return false, fmt.Errorf("read outbound evidence for message %d: %w", messageID, err)
 	}
 	return sent, nil
 }
 
-// refreshAccountAttributionIfSentChangedTx runs a label membership mutation
-// and refreshes the message only when its Sent evidence changed.
-func (s *Store) refreshAccountAttributionIfSentChangedTx(
+// refreshAccountAttributionIfOutboundChangedTx runs a label membership mutation
+// and refreshes the message only when its outbound evidence changed.
+func (s *Store) refreshAccountAttributionIfOutboundChangedTx(
 	ctx context.Context, tx *loggedTx, messageID int64, mutate func() error,
 ) error {
-	before, err := messageHasSentEvidenceTx(ctx, tx, messageID)
+	before, err := messageHasOutboundEvidenceTx(ctx, tx, messageID)
 	if err != nil {
 		return err
 	}
 	if err := mutate(); err != nil {
 		return err
 	}
-	after, err := messageHasSentEvidenceTx(ctx, tx, messageID)
+	after, err := messageHasOutboundEvidenceTx(ctx, tx, messageID)
 	if err != nil {
 		return err
 	}
@@ -739,30 +742,30 @@ func (s *Store) refreshAccountAttributionIfSentChangedTx(
 	return err
 }
 
-// labelSentFlips collects messages of one source whose labels changed Sent
-// evidence because a label definition changed. Callers capture the labels a
+// labelOutboundFlips collects messages of one source whose labels changed
+// outbound evidence because a label definition changed. Callers capture the labels a
 // write can touch, mutate them, then apply the flips before commit.
-type labelSentFlips struct {
+type labelOutboundFlips struct {
 	ctx      context.Context
 	tx       *loggedTx
 	sourceID int64
 	before   map[int64]bool
 }
 
-func newLabelSentFlips(ctx context.Context, tx *loggedTx, sourceID int64) *labelSentFlips {
-	return &labelSentFlips{ctx: ctx, tx: tx, sourceID: sourceID}
+func newLabelOutboundFlips(ctx context.Context, tx *loggedTx, sourceID int64) *labelOutboundFlips {
+	return &labelOutboundFlips{ctx: ctx, tx: tx, sourceID: sourceID}
 }
 
-func sentEvidenceByLabelQuery(where string) string {
-	return `SELECT l.id, COALESCE(` + sentEvidenceLabelSQL("l", "src") + `, FALSE)
+func outboundEvidenceByLabelQuery(where string) string {
+	return `SELECT l.id, COALESCE(` + outboundEvidenceLabelSQL("l", "src") + `, FALSE)
 		FROM labels l JOIN sources src ON src.id = l.source_id
 		WHERE l.source_id = ? AND ` + where
 }
 
-// captureLabels records the Sent evidence of every existing label a write to
+// captureLabels records the outbound evidence of every existing label a write to
 // these provider IDs or names can update, rename onto or merge. Labels created
 // by the write have no members and need no capture.
-func (f *labelSentFlips) captureLabels(sourceLabelIDs, names []string) error {
+func (f *labelOutboundFlips) captureLabels(sourceLabelIDs, names []string) error {
 	if f == nil || (len(sourceLabelIDs) == 0 && len(names) == 0) {
 		return nil
 	}
@@ -780,17 +783,17 @@ func (f *labelSentFlips) captureLabels(sourceLabelIDs, names []string) error {
 				args = append(args, k)
 			}
 		}
-		rows, err := f.tx.QueryContext(f.ctx, sentEvidenceByLabelQuery(
+		rows, err := f.tx.QueryContext(f.ctx, outboundEvidenceByLabelQuery(
 			"(l.source_label_id IN ("+placeholders+") OR l.name IN ("+placeholders+"))"), args...)
 		if err != nil {
-			return fmt.Errorf("read label sent evidence: %w", err)
+			return fmt.Errorf("read label outbound evidence: %w", err)
 		}
 		for rows.Next() {
 			var id int64
 			var sent bool
 			if err := rows.Scan(&id, &sent); err != nil {
 				_ = rows.Close()
-				return fmt.Errorf("scan label sent evidence: %w", err)
+				return fmt.Errorf("scan label outbound evidence: %w", err)
 			}
 			if _, seen := f.before[id]; !seen {
 				f.before[id] = sent
@@ -799,17 +802,17 @@ func (f *labelSentFlips) captureLabels(sourceLabelIDs, names []string) error {
 		err = rows.Err()
 		_ = rows.Close()
 		if err != nil {
-			return fmt.Errorf("read label sent evidence: %w", err)
+			return fmt.Errorf("read label outbound evidence: %w", err)
 		}
 	}
 	return nil
 }
 
-// applyLabelSentFlipsTx refreshes members of every captured label whose Sent
+// applyLabelOutboundFlipsTx refreshes members of every captured label whose outbound
 // evidence changed. A label merged away moves its members onto a surviving
 // captured label, so a vanished label with different evidence refreshes the
 // members of every survivor whose evidence differs from it.
-func (s *Store) applyLabelSentFlipsTx(f *labelSentFlips) error {
+func (s *Store) applyLabelOutboundFlipsTx(f *labelOutboundFlips) error {
 	if f == nil || len(f.before) == 0 {
 		return nil
 	}
@@ -821,17 +824,17 @@ func (s *Store) applyLabelSentFlipsTx(f *labelSentFlips) error {
 	slices.Sort(ids)
 	after := make(map[int64]bool, len(ids))
 	err := queryInChunksContext(ctx, tx, ids, []any{f.sourceID},
-		sentEvidenceByLabelQuery("l.id IN (%s)"), func(rows *loggedRows) error {
+		outboundEvidenceByLabelQuery("l.id IN (%s)"), func(rows *loggedRows) error {
 			var id int64
 			var sent bool
 			if err := rows.Scan(&id, &sent); err != nil {
-				return fmt.Errorf("scan label sent evidence: %w", err)
+				return fmt.Errorf("scan label outbound evidence: %w", err)
 			}
 			after[id] = sent
 			return nil
 		})
 	if err != nil {
-		return fmt.Errorf("read label sent evidence: %w", err)
+		return fmt.Errorf("read label outbound evidence: %w", err)
 	}
 	refresh := make(map[int64]struct{})
 	for _, id := range ids {

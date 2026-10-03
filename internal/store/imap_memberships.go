@@ -339,7 +339,7 @@ func (s *Store) applyIMAPMailboxDeltas(
 				}
 				labelIDs = append(labelIDs, labelID)
 			}
-			if err := s.refreshAccountAttributionIfSentChangedTx(ctx, tx, messageID, func() error {
+			if err := s.refreshAccountAttributionIfOutboundChangedTx(ctx, tx, messageID, func() error {
 				return replaceMessageLabelsTx(tx, messageID, labelIDs)
 			}); err != nil {
 				return fmt.Errorf("replace labels for IMAP message %d: %w", messageID, err)
