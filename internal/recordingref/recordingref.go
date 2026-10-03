@@ -138,10 +138,17 @@ func admit(raw string, allowed map[string]bool) (Ref, bool) {
 }
 
 func Scan(text string, origins []string) []Ref {
+	return scanProse(text, origins, nil)
+}
+
+func scanProse(text string, origins []string, exact map[string]bool) []Ref {
 	allowed := originSet(origins)
 	seen := make(map[string]bool)
 	var refs []Ref
 	for _, token := range tokens.FindAllString(text, -1) {
+		if exact[token] {
+			continue
+		}
 		raw := strings.TrimRight(token, ".,;:!?)]}'")
 		if r, ok := admit(raw, allowed); ok && !seen[r.RouteKey] {
 			refs = append(refs, r)

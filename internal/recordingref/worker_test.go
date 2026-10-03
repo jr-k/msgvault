@@ -131,6 +131,36 @@ func TestRecordingReferenceFeedHTML(t *testing.T) {
 	assert.Empty(requests)
 }
 
+func TestRecordingReferenceFeedHTMLVisibleURL(t *testing.T) {
+	assert, require := assert.New(t), require.New(t)
+	f := storetest.New(t)
+	id := f.CreateMessage("html-visible-url")
+	text := "https://cap.so/s/abc! https://cap.so/s/other"
+	body := `<a href="https://cap.so/s/abc!">https://cap.so/s/abc!</a> https://cap.so/s/other`
+	require.NoError(f.Store.UpsertMessageBody(id, sql.NullString{String: text, Valid: true}, sql.NullString{String: body, Valid: true}))
+	requests := make(chan string, 5)
+	client := recordingClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var req docbankmedia.ReferenceRequest
+		if !assert.NoError(json.UnmarshalRead(r.Body, &req)) {
+			return
+		}
+		requests <- req.ReferenceURL
+		writeReceipt(w, req.OperationID)
+	})
+	w := NewWorker(f.Store, client, "destination", nil, nil)
+	runDiscovery(t, w, 2)
+	require.Len(requests, 2)
+	assert.ElementsMatch([]string{"https://cap.so/s/abc!", "https://cap.so/s/other"}, []string{<-requests, <-requests})
+	savedText, savedHTML := f.GetMessageBody(id)
+	assert.Equal(text, savedText.String)
+	assert.Equal(body, savedHTML.String)
+	text += " https://cap.so/s/abc"
+	require.NoError(f.Store.UpsertMessageBody(id, sql.NullString{String: text, Valid: true}, sql.NullString{String: body, Valid: true}))
+	runDiscovery(t, w, 3)
+	require.Len(requests, 1)
+	assert.Equal("https://cap.so/s/abc", <-requests)
+}
+
 func TestRecordingReferenceBackfill(t *testing.T) {
 	assert, require := assert.New(t), require.New(t)
 	f := storetest.New(t)

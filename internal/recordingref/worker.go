@@ -56,8 +56,13 @@ func (w *Worker) gated(ctx context.Context, fn func() error) error {
 func messageRefs(m store.RecordingMessage, origins []string) []Ref {
 	var refs []Ref
 	seen := make(map[string]bool)
+	anchors := ScanHTML(m.BodyHTML, origins)
+	exact := make(map[string]bool, len(anchors))
+	for _, r := range anchors {
+		exact[r.Reference] = true
+	}
 	// Exact anchor targets take precedence over prose punctuation heuristics.
-	for _, r := range append(ScanHTML(m.BodyHTML, origins), Scan(m.Body, origins)...) {
+	for _, r := range append(anchors, scanProse(m.Body, origins, exact)...) {
 		if !seen[r.RouteKey] {
 			refs = append(refs, r)
 			seen[r.RouteKey] = true
