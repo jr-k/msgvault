@@ -217,6 +217,57 @@ func TestStoredCredentialsLegacyImportFailureKeepsFile(t *testing.T) {
 	})
 }
 
+func TestStoredCredentialsRefusesSymlinkedLegacyFile(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	tokensDir := t.TempDir()
+	path := writeLegacyCredential(t, tokensDir, "remote", "")
+	target := filepath.Join(t.TempDir(), "elsewhere.json")
+	require.NoError(os.WriteFile(target, []byte(`{"scheme":"bearer","value":"`+credentialCanary+`"}`), 0o600))
+	require.NoError(os.Remove(path))
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	_, err := peoplesweep.NewStoredCredentials(tokensDir).Load("remote", "https://api.example.test/v1")
+	require.ErrorContains(err, "not a regular file")
+	snapshot, err := providercredentials.Read(tokensDir)
+	require.NoError(err)
+	assert.False(snapshot.Stored(providercredentials.PeopleProviderID("remote")))
+	assert.FileExists(target)
+}
+
+func TestStoredCredentialsKeepImportedKeyWhenLegacyFileCannotBeRemoved(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a directory the current user cannot write")
+	}
+	assert := assert.New(t)
+	require := require.New(t)
+	tokensDir := t.TempDir()
+	endpoint := "https://api.example.test/v1"
+	path := writeLegacyCredential(t, tokensDir, "remote", `{"scheme":"bearer","value":"`+credentialCanary+`"}`)
+	legacyDir := filepath.Dir(path)
+	require.NoError(os.Chmod(legacyDir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(legacyDir, 0o700) })
+	store := peoplesweep.NewStoredCredentials(tokensDir)
+
+	for range 2 {
+		value, err := store.Load("remote", endpoint)
+		require.NoError(err)
+		assert.Equal(credentialCanary, value)
+	}
+	assert.FileExists(path)
+
+	// Deleting would let the leftover file bring the key back on the next read.
+	revision, _, err := store.Revision("remote", endpoint)
+	require.NoError(err)
+	_, err = store.DeleteIfRevision("remote", endpoint, revision)
+	require.ErrorContains(err, path)
+	value, err := store.Load("remote", endpoint)
+	require.NoError(err)
+	assert.Equal(credentialCanary, value)
+}
+
 func TestStoredCredentialsRejectsOtherOrigin(t *testing.T) {
 	store := peoplesweep.NewStoredCredentials(t.TempDir())
 	saveStoredCredential(t, store, "remote", "https://api.example.test/v1", credentialCanary)

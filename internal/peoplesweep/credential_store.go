@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -148,6 +149,10 @@ func (s StoredCredentials) DeleteIfRevision(profileName, endpoint, expected stri
 	if !snapshot.Stored(id) {
 		return "", fmt.Errorf("%w for profile %q", ErrCredentialNotFound, profileName)
 	}
+	// A legacy file that could not be removed would be imported again after the delete.
+	if path := s.legacyPath(profileName); fileExists(path) {
+		return "", fmt.Errorf("delete people provider credential for profile %q: remove the older key file %s first", profileName, path)
+	}
 	deleted, err := providercredentials.DeleteIfRevision(s.tokensDir, expected, id)
 	if err != nil {
 		return "", err
@@ -159,8 +164,8 @@ func (s StoredCredentials) DeleteIfRevision(profileName, endpoint, expected stri
 // then removes the old file. A key already stored wins over the old file, and
 // an empty file is how older releases recorded a deleted key.
 func (s StoredCredentials) importLegacy(profileName, endpoint string) error {
-	path := filepath.Join(s.tokensDir, legacyCredentialNamespace, profileName+".json")
-	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+	path := s.legacyPath(profileName)
+	if !fileExists(path) {
 		return nil
 	}
 	load := func() (string, bool, error) {
@@ -181,24 +186,52 @@ func (s StoredCredentials) importLegacy(profileName, endpoint string) error {
 	var retireErr error
 	retire := func() error {
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			retireErr = fmt.Errorf("remove imported legacy people provider credential %s: %w", path, err)
+			retireErr = err
 		}
 		return retireErr
 	}
 	id := providercredentials.PeopleProviderID(profileName)
 	_, err := providercredentials.ImportIfAbsent(s.tokensDir, id, endpoint, load, retire)
-	if err != nil && !errors.Is(err, retireErr) {
+	if retireErr != nil && errors.Is(err, retireErr) {
+		// The shared store already holds the outcome, so the key stays usable.
+		slog.Warn("could not remove imported legacy people provider key file", "path", path, "error", retireErr)
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("import legacy people provider credential %s (left in place): %w", path, err)
 	}
-	return err
+	return nil
+}
+
+func (s StoredCredentials) legacyPath(profileName string) string {
+	return filepath.Join(s.tokensDir, legacyCredentialNamespace, profileName+".json")
+}
+
+func fileExists(path string) bool {
+	_, err := os.Lstat(path)
+	return !errors.Is(err, fs.ErrNotExist)
 }
 
 func readLegacyCredential(path string) ([]byte, error) {
-	file, err := os.Open(path) // #nosec G304 -- validated profile name under the tokens directory.
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("legacy key file is not a regular file")
+	}
+	file, err := os.OpenFile(path, legacyCredentialOpenFlags, 0) // #nosec G304 -- validated profile name under the tokens directory.
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close() //nolint:errcheck // read-only file
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		return nil, errors.New("legacy key file changed while it was read")
+	}
 	return io.ReadAll(io.LimitReader(file, 16<<10))
 }
 
