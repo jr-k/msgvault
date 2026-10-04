@@ -142,7 +142,7 @@ func TestProviderConsentMigrationKeepsHistoryAndIDs(t *testing.T) {
 	for _, table := range []string{
 		"person_inference_consents", "person_enrichment_consents", "person_semantic_embedding_consents",
 	} {
-		exists, err := st.tableExists(table)
+		exists, err := st.tableExistsContext(t.Context(), table)
 		require.NoError(err)
 		assert.False(exists, table+" must be dropped after the copy")
 	}

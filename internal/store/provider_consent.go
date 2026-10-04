@@ -225,7 +225,7 @@ func (s *Store) hasActiveConsent(ctx context.Context, purpose ConsentPurpose, fi
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM provider_consents
 		WHERE purpose = ? AND fingerprint = ? AND revoked_at IS NULL)`,
 		string(purpose), fingerprint).Scan(&active)
-	if legacy := consentPurposes[purpose].legacyTable; err != nil && s.onlyLegacyConsents(legacy) {
+	if legacy := consentPurposes[purpose].legacyTable; err != nil && s.onlyLegacyConsents(ctx, legacy) {
 		// A read-only open skips migration, so an old archive keeps grants here.
 		err = s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM `+legacy+`
 			WHERE profile_fingerprint = ? AND revoked_at IS NULL)`, fingerprint).Scan(&active)
@@ -236,12 +236,12 @@ func (s *Store) hasActiveConsent(ctx context.Context, purpose ConsentPurpose, fi
 	return active, nil
 }
 
-func (s *Store) onlyLegacyConsents(legacy string) bool {
-	current, err := s.tableExists("provider_consents")
+func (s *Store) onlyLegacyConsents(ctx context.Context, legacy string) bool {
+	current, err := s.tableExistsContext(ctx, "provider_consents")
 	if err != nil || current {
 		return false
 	}
-	old, err := s.tableExists(legacy)
+	old, err := s.tableExistsContext(ctx, legacy)
 	return err == nil && old
 }
 

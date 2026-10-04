@@ -16,7 +16,7 @@ import (
 // over to the reworked disclosure. Those rows and their consents are removed
 // so every remaining profile decodes as a canonical ProviderProfile.
 func (s *Store) migratePersonInferenceProviderV2(ctx context.Context) error {
-	legacyConsents, err := s.tableExists("person_inference_consents")
+	legacyConsents, err := s.tableExistsContext(ctx, "person_inference_consents")
 	if err != nil {
 		return fmt.Errorf("check person_inference_consents: %w", err)
 	}

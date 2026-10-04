@@ -19,7 +19,7 @@ func (s *Store) migrateProviderConsents(ctx context.Context) error {
 	}
 	present := legacy[:0]
 	for _, source := range legacy {
-		exists, err := s.tableExists(source.table)
+		exists, err := s.tableExistsContext(ctx, source.table)
 		if err != nil {
 			return fmt.Errorf("check %s: %w", source.table, err)
 		}
