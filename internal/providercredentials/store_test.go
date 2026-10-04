@@ -219,7 +219,7 @@ func TestStoreSerializesSameETagWriters(t *testing.T) {
 	requirements.NoError(err)
 	assertions.Contains(string(raw), `"id":"vector.embeddings"`)
 	assertions.Contains(string(raw), `"kind":"vector_embeddings"`)
-	assertions.Contains(string(raw), `"revision":1`)
+	assertions.Contains(string(raw), `"revision":`)
 }
 
 func TestCredentialIDsAreStableAndValidated(t *testing.T) {
@@ -303,6 +303,37 @@ func TestPutIfRevisionRejectsTokenFromDeletedAndRecreatedKey(t *testing.T) {
 	requirements.ErrorIs(err, ErrConflict)
 }
 
+func TestRecreatedKeyWithTheSameSecretGetsANewRevision(t *testing.T) {
+	requirements := require.New(t)
+	dir := filepath.Join(t.TempDir(), "tokens")
+	id := PeopleProviderID("remote")
+	endpoint := "https://api.example.test/v1"
+
+	empty, err := Read(dir)
+	requirements.NoError(err)
+	absent, err := empty.Revision(id)
+	requirements.NoError(err)
+	first, err := PutIfRevision(dir, absent, id, endpoint, "same-secret")
+	requirements.NoError(err)
+	stale, err := first.Revision(id)
+	requirements.NoError(err)
+	_, err = DeleteIfRevision(dir, stale, id)
+	requirements.NoError(err)
+	recreated, err := PutIfRevision(dir, absent, id, endpoint, "same-secret")
+	requirements.NoError(err)
+	replacement, err := recreated.Revision(id)
+	requirements.NoError(err)
+	requirements.NotEqual(stale, replacement)
+	requirements.NotEqual(first.ETag, recreated.ETag)
+
+	// A stalled rollback holding the first token must not delete the replacement.
+	_, err = DeleteIfRevision(dir, stale, id)
+	requirements.ErrorIs(err, ErrConflict)
+	current, err := Read(dir)
+	requirements.NoError(err)
+	requirements.True(current.Stored(id))
+}
+
 func TestDeleteIfRevisionRemovesOnlyTheObservedCredential(t *testing.T) {
 	requirements := require.New(t)
 	assertions := assert.New(t)
@@ -357,16 +388,16 @@ func TestImportIfAbsentHoldsStoreLockUntilRetired(t *testing.T) {
 	requirements := require.New(t)
 	dir := filepath.Join(t.TempDir(), "tokens")
 	id := PeopleProviderID("remote")
-	imported := Snapshot{credentials: map[string]record{id: {
-		ID: id, Kind: recordKind(id), Value: "legacy", Origin: "https://api.example.test", Revision: 1,
-	}}}
-	importedRevision, err := imported.Revision(id)
-	requirements.NoError(err)
 
 	deleted := make(chan error, 1)
 	load := func() (string, bool, error) {
 		go func() {
-			_, deleteErr := DeleteIfRevision(dir, importedRevision, id)
+			_, deleteErr := mutate(dir, func(current Snapshot) error {
+				if !current.Stored(id) {
+					return ErrConflict
+				}
+				return nil
+			}, func(credentials map[string]record) { delete(credentials, id) })
 			deleted <- deleteErr
 		}()
 		return "legacy", true, nil
@@ -381,7 +412,7 @@ func TestImportIfAbsentHoldsStoreLockUntilRetired(t *testing.T) {
 		retired = true
 		return nil
 	}
-	_, err = ImportIfAbsent(dir, id, "https://api.example.test/v1", load, retire)
+	_, err := ImportIfAbsent(dir, id, "https://api.example.test/v1", load, retire)
 	requirements.NoError(err)
 	requirements.NoError(<-deleted, "the delete must run after the import it raced")
 	requirements.True(retired)

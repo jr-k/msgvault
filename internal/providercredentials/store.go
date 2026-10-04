@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -371,12 +372,19 @@ func DeleteIfRevision(tokenDir, expected, id string) (Snapshot, error) {
 
 func putRecord(id, origin, value string) func(map[string]record) {
 	return func(credentials map[string]record) {
-		revision := int64(1)
-		if current, ok := credentials[id]; ok {
-			revision = current.Revision + 1
-		}
-		credentials[id] = record{ID: id, Kind: recordKind(id), Value: value, Origin: origin, Revision: revision}
+		credentials[id] = record{ID: id, Kind: recordKind(id), Value: value, Origin: origin, Revision: nextRevision(credentials, id)}
 	}
+}
+
+// nextRevision starts a new record at a random revision, so a key deleted and
+// saved again never repeats a Revision token or ETag observed before.
+func nextRevision(credentials map[string]record, id string) int64 {
+	if current, ok := credentials[id]; ok {
+		return current.Revision + 1
+	}
+	var random [8]byte
+	_, _ = rand.Read(random[:])
+	return int64(binary.BigEndian.Uint64(random[:])>>12) + 1
 }
 
 func etagMatches(ifMatch string) func(Snapshot) error {
@@ -406,13 +414,9 @@ func PutSuppression(tokenDir, ifMatch, value string) (Snapshot, error) {
 		return Snapshot{}, errors.New("suppression key cannot be empty")
 	}
 	return mutate(tokenDir, etagMatches(ifMatch), func(credentials map[string]record) {
-		revision := int64(1)
-		if current, ok := credentials[PersonEnrichmentSuppressionID]; ok {
-			revision = current.Revision + 1
-		}
 		credentials[PersonEnrichmentSuppressionID] = record{
 			ID: PersonEnrichmentSuppressionID, Kind: recordKind(PersonEnrichmentSuppressionID),
-			Value: value, Revision: revision,
+			Value: value, Revision: nextRevision(credentials, PersonEnrichmentSuppressionID),
 		}
 	})
 }
