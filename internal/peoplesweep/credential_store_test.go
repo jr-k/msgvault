@@ -217,6 +217,27 @@ func TestStoredCredentialsLegacyImportFailureKeepsFile(t *testing.T) {
 	})
 }
 
+func TestStoredCredentialsLegacyFileSizes(t *testing.T) {
+	t.Run("a key over 16 KiB imports", func(t *testing.T) {
+		tokensDir := t.TempDir()
+		secret := strings.Repeat("k", 20<<10)
+		path := writeLegacyCredential(t, tokensDir, "remote", `{"scheme":"bearer","value":"`+secret+`"}`)
+
+		value, err := peoplesweep.NewStoredCredentials(tokensDir).Load("remote", "https://api.example.test/v1")
+		require.NoError(t, err)
+		assert.Equal(t, secret, value)
+		assert.NoFileExists(t, path)
+	})
+	t.Run("an oversized file is refused and kept", func(t *testing.T) {
+		tokensDir := t.TempDir()
+		path := writeLegacyCredential(t, tokensDir, "remote", `{"scheme":"bearer","value":"`+strings.Repeat("k", 1<<20)+`"}`)
+
+		_, err := peoplesweep.NewStoredCredentials(tokensDir).Load("remote", "https://api.example.test/v1")
+		require.ErrorContains(t, err, "too large")
+		assert.FileExists(t, path)
+	})
+}
+
 func TestStoredCredentialsRefusesSymlinkedLegacyFile(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)

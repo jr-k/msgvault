@@ -523,6 +523,10 @@ func persist(tokenDir string, permissions permissionBackend, credentials map[str
 		return Snapshot{}, fmt.Errorf("encode credential store: %w", err)
 	}
 	encoded = append(encoded, '\n')
+	if int64(len(encoded)) > maximumCredentialStoreBytes {
+		// Publishing it would make every stored credential unreadable.
+		return Snapshot{}, errors.New("credential store would exceed its size limit")
+	}
 	published, err := publish(tokenDir, permissions, encoded)
 	if err != nil {
 		return Snapshot{}, err

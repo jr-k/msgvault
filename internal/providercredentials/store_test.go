@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -301,6 +302,29 @@ func TestPutIfRevisionRejectsTokenFromDeletedAndRecreatedKey(t *testing.T) {
 
 	_, err = PutIfRevision(dir, stale, id, "https://api.example.test/v1", "c")
 	requirements.ErrorIs(err, ErrConflict)
+}
+
+func TestPutRefusesToGrowTheStorePastItsSizeLimit(t *testing.T) {
+	requirements := require.New(t)
+	dir := filepath.Join(t.TempDir(), "tokens")
+	endpoint := "https://api.example.test/v1"
+	empty, err := Read(dir)
+	requirements.NoError(err)
+	before, err := Put(dir, empty.ETag, VectorEmbeddingsID, endpoint, "small")
+	requirements.NoError(err)
+
+	id := PeopleProviderID("remote")
+	absent, err := before.Revision(id)
+	requirements.NoError(err)
+	_, err = PutIfRevision(dir, absent, id, endpoint, strings.Repeat("k", int(maximumCredentialStoreBytes)))
+	requirements.ErrorContains(err, "size limit")
+
+	after, err := Read(dir)
+	requirements.NoError(err)
+	requirements.Equal(before.ETag, after.ETag)
+	value, _, err := after.Resolve(VectorEmbeddingsID, endpoint, "", nil)
+	requirements.NoError(err)
+	requirements.Equal("small", value)
 }
 
 func TestRecreatedKeyWithTheSameSecretGetsANewRevision(t *testing.T) {

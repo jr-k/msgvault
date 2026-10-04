@@ -21,7 +21,11 @@ var (
 	ErrCredentialNotFound        = errors.New("people provider credential not found")
 )
 
-const legacyCredentialNamespace = "people-providers"
+const (
+	legacyCredentialNamespace = "people-providers"
+	// Older releases took keys of any size, so read up to the shared store's own limit.
+	maxLegacyCredentialBytes = 1 << 20
+)
 
 // Credential carries an authentication scheme and an opaque secret. The
 // pointer-backed secret prevents fmt's value-%p special case from inspecting
@@ -232,7 +236,11 @@ func readLegacyCredential(path string) ([]byte, error) {
 	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
 		return nil, errors.New("legacy key file changed while it was read")
 	}
-	return io.ReadAll(io.LimitReader(file, 16<<10))
+	raw, err := io.ReadAll(io.LimitReader(file, maxLegacyCredentialBytes+1))
+	if err == nil && len(raw) > maxLegacyCredentialBytes {
+		return nil, errors.New("legacy key file is too large")
+	}
+	return raw, err
 }
 
 // ValidateProviderProfileName applies the single grammar used by provider
