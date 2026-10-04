@@ -5,11 +5,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	emersionimap "github.com/emersion/go-imap/v2"
 	"github.com/stretchr/testify/assert"
@@ -18,6 +21,7 @@ import (
 	"go.kenn.io/msgvault/internal/api"
 	"go.kenn.io/msgvault/internal/config"
 	imaplib "go.kenn.io/msgvault/internal/imap"
+	"go.kenn.io/msgvault/internal/importer"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
 )
@@ -234,16 +238,6 @@ func (f draftReplyFixture) runCompose(
 	return events, err
 }
 
-func (f draftReplyFixture) composeToPerson(
-	t *testing.T, adapter *storeAPIAdapter, personID int64, to string,
-) ([]api.CLIRunEvent, error) {
-	t.Helper()
-	return f.runCompose(t, adapter, nil,
-		"--person-id", strconv.FormatInt(personID, 10),
-		"--source-id", strconv.FormatInt(f.source.ID, 10), "--from", testutil.IMAPTestUsername,
-		"--to", to, "--subject", "Hello", "--body", "person body", "--json")
-}
-
 func (f draftReplyFixture) listPerson(t *testing.T, adapter *storeAPIAdapter, personID int64) []personDraftAddress {
 	t.Helper()
 	events, err := f.runCompose(t, adapter, nil, "--person-id", strconv.FormatInt(personID, 10), "--json")
@@ -276,13 +270,6 @@ func TestDraftComposePersonArgs(t *testing.T) {
 	require.NoError(err)
 	assert.Equal(int64(7), intent.PersonID)
 	assert.True(intent.JSON)
-	intent, err = parseDraftComposeArgs([]string{
-		"draft-compose", "--person-id", "7", "--account", "owner@example.com",
-		"--to", "Carol <carol@example.com>", "--cc", "copy@example.com", "--body", "x",
-	})
-	require.NoError(err)
-	assert.Equal([]string{"Carol <carol@example.com>"}, intent.To)
-	assert.Equal([]string{"copy@example.com"}, intent.Cc)
 	intent, err = parseDraftComposeArgs([]string{"draft-compose", "--source-id", "42", "--cc", "copy@example.com"})
 	require.NoError(err)
 	assert.Zero(intent.PersonID)
@@ -296,9 +283,13 @@ func TestDraftComposePersonArgs(t *testing.T) {
 		{"draft-compose", "--person-id", "7", "--body", "x"},
 		{"draft-compose", "--person-id", "7", "--cc", "copy@example.com"},
 		{"draft-compose", "--person-id", "7", "--account", "owner@example.com"},
-		{"draft-compose", "--person-id", "7", "--source-id", "42", "--to", "a@example.com", "--to", "b@example.com"},
-		{"draft-compose", "--person-id", "7", "--conversation", "3", "--body", "x"},
 		{"draft-compose", "--person-id", "7", "--to", "a@example.com"},
+		{"draft-compose", "--person-id", "7", "--bcc", "hidden@example.com"},
+		{"draft-compose", "--person-id", "7", "--source-id", "42", "--to", "a@example.com"},
+		{"draft-compose", "--person-id", "7", "--from", "owner@example.com"},
+		{"draft-compose", "--person-id", "7", "--subject", "Hi"},
+		{"draft-compose", "--person-id", "7", "--conversation", "3", "--body", "x"},
+		{"draft-compose", "--person-id", "7", "--conversation", "3", "--reply-to", "4"},
 	} {
 		_, err := parseDraftComposeArgs(args)
 		require.Error(err, args)
@@ -334,91 +325,6 @@ func TestDraftComposePersonListsArchivedAddresses(t *testing.T) {
 	assert.NotContains(text, "unrelated@example.com")
 	assert.NotContains(text, "curated-only@example.com")
 	assert.NotContains(text, "Carol")
-	assert.Zero(*f.providerCalls)
-}
-
-func TestDraftComposePersonCreatesDraftToChosenAddress(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-	f := newPersonDraftFixture(t)
-	supported := supportedPersonAddresses(f.listPerson(t, f.adapter, f.personID))
-	require.Len(supported, 2)
-	chosen := supported[1]
-	require.Equal("carol.alt@example.com", chosen)
-
-	server := httptest.NewServer(api.NewServerWithOptions(api.ServerOptions{
-		Config: &config.Config{
-			HomeDir: t.TempDir(),
-			Server:  config.ServerConfig{APIKey: "owner-test-key"},
-		},
-		Store:  f.adapter,
-		Logger: slog.New(slog.DiscardHandler),
-	}).Router())
-	t.Cleanup(server.Close)
-	body, err := json.Marshal(map[string]any{"args": []string{
-		"draft-compose", "--person-id", strconv.FormatInt(f.personID, 10),
-		"--source-id", strconv.FormatInt(f.source.ID, 10), "--from", testutil.IMAPTestUsername,
-		"--to", chosen, "--cc", "unverified-copy@example.com",
-		"--subject", "Person subject", "--body", "person body", "--json",
-	}})
-	require.NoError(err)
-	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/cli/run", bytes.NewReader(body))
-	require.NoError(err)
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Api-Key", "owner-test-key")
-	response, err := http.DefaultClient.Do(request)
-	require.NoError(err)
-	defer func() { _ = response.Body.Close() }()
-	require.Equal(http.StatusOK, response.StatusCode)
-	var events []api.CLIRunEvent
-	scanner := bufio.NewScanner(response.Body)
-	for scanner.Scan() {
-		var event api.CLIRunEvent
-		require.NoError(json.Unmarshal(scanner.Bytes(), &event))
-		events = append(events, event)
-	}
-	require.NoError(scanner.Err())
-	require.Len(events, 2)
-	require.Equal(cliStreamStdout, events[0].Type)
-	require.Equal("complete", events[1].Type)
-
-	var result draftReplyOutput
-	require.NoError(json.Unmarshal([]byte(events[0].Data), &result))
-	assert.Equal(draftReplyStatusCreated, result.Status)
-	assert.Equal(1, *f.providerCalls)
-	message, err := f.store.GetMessage(result.MessageID)
-	require.NoError(err)
-	assert.Equal([]string{chosen}, message.To)
-	assert.Equal([]string{"unverified-copy@example.com"}, message.Cc)
-	storedRaw, err := f.store.GetMessageRaw(result.MessageID)
-	require.NoError(err)
-	assert.Contains(string(storedRaw), "To: <"+chosen+">")
-	assert.Contains(string(storedRaw), "Cc: <unverified-copy@example.com>")
-	assert.NotContains(string(storedRaw), "carol@example.com")
-	draft, err := f.store.GetIMAPDraft(result.DraftID)
-	require.NoError(err)
-	_, fetchedRaw := fetchDraftMailboxMessage(t, f.config, draft.CurrentReceipt)
-	assert.Equal(storedRaw, fetchedRaw)
-}
-
-func TestDraftComposePersonRejectsAddressOutsidePerson(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-	f := newPersonDraftFixture(t)
-	for _, to := range []string{
-		"unrelated@example.com",
-		"curated-only@example.com",
-		"carol-chat@example.org",
-		"carol.alt@example.com, other@example.com",
-		"not an address",
-	} {
-		events, err := f.composeToPerson(t, f.adapter, f.personID, to)
-		var coded *api.CLIRunCodedError
-		require.ErrorAs(err, &coded, to)
-		assert.Equal("invalid_compose_metadata", coded.Code, to)
-		assert.NotContains(coded.Err.Error(), "@", to)
-		assert.Empty(events, to)
-	}
 	assert.Zero(*f.providerCalls)
 }
 
@@ -460,21 +366,6 @@ func TestDraftComposePersonBindings(t *testing.T) {
 			absorbedParticipants: []int64{firstAbsorbed, secondAbsorbed}, merge: merged,
 		}
 	}
-	accepts := func(t *testing.T, f bindingsFixture, personID int64, to string) {
-		t.Helper()
-		events, err := f.composeToPerson(t, f.adapter, personID, to)
-		require.NoError(t, err, to)
-		require.Len(t, events, 1, to)
-		var result draftReplyOutput
-		require.NoError(t, json.Unmarshal([]byte(events[0].Data), &result))
-		assert.Equal(t, draftReplyStatusCreated, result.Status, to)
-	}
-	rejects := func(t *testing.T, f bindingsFixture, personID int64, to string) {
-		t.Helper()
-		_, err := f.composeToPerson(t, f.adapter, personID, to)
-		require.Error(t, err, to)
-		assert.Equal(t, "invalid_compose_metadata", err.Error(), to)
-	}
 	split := func(t *testing.T, f bindingsFixture, participants []int64) *store.PersonSplitResult {
 		t.Helper()
 		result, err := f.store.SplitPersonMergeContext(t.Context(), store.PersonSplitRequest{
@@ -492,14 +383,9 @@ func TestDraftComposePersonBindings(t *testing.T) {
 		_, err := f.runCompose(t, f.adapter, nil, "--person-id", strconv.FormatInt(f.absorbed.ID, 10))
 		require.Error(err)
 		assert.Equal("invalid_args", err.Error())
-		_, err = f.composeToPerson(t, f.adapter, f.absorbed.ID, "absorbed-1@example.com")
-		require.Error(err)
-		assert.Equal("invalid_args", err.Error())
 		assert.ElementsMatch(
 			[]string{"survivor@example.com", "absorbed-1@example.com", "absorbed-2@example.com"},
 			supportedPersonAddresses(f.listPerson(t, f.adapter, f.survivor.ID)))
-		accepts(t, f, f.survivor.ID, "survivor@example.com")
-		accepts(t, f, f.survivor.ID, "absorbed-2@example.com")
 	})
 
 	t.Run("exact_split", func(t *testing.T) {
@@ -510,10 +396,6 @@ func TestDraftComposePersonBindings(t *testing.T) {
 		require.True(result.ExactReversal)
 		assert.ElementsMatch([]string{"absorbed-1@example.com", "absorbed-2@example.com"},
 			supportedPersonAddresses(f.listPerson(t, f.adapter, result.NewPerson.ID)))
-		rejects(t, f, result.SourcePerson.ID, "absorbed-1@example.com")
-		accepts(t, f, result.NewPerson.ID, "absorbed-1@example.com")
-		accepts(t, f, result.SourcePerson.ID, "survivor@example.com")
-		rejects(t, f, result.NewPerson.ID, "survivor@example.com")
 	})
 
 	t.Run("partial_split", func(t *testing.T) {
@@ -526,11 +408,6 @@ func TestDraftComposePersonBindings(t *testing.T) {
 			supportedPersonAddresses(f.listPerson(t, f.adapter, result.NewPerson.ID)))
 		assert.ElementsMatch([]string{"survivor@example.com", "absorbed-2@example.com"},
 			supportedPersonAddresses(f.listPerson(t, f.adapter, result.SourcePerson.ID)))
-		accepts(t, f, result.NewPerson.ID, "absorbed-1@example.com")
-		rejects(t, f, result.NewPerson.ID, "absorbed-2@example.com")
-		rejects(t, f, result.NewPerson.ID, "survivor@example.com")
-		accepts(t, f, result.SourcePerson.ID, "absorbed-2@example.com")
-		rejects(t, f, result.SourcePerson.ID, "absorbed-1@example.com")
 	})
 }
 
@@ -548,8 +425,6 @@ func TestDraftComposePersonIsOwnerOnly(t *testing.T) {
 		for _, args := range [][]string{
 			{"--person-id", person},
 			{"--person-id", person, "--json"},
-			{"--person-id", person, "--source-id", strconv.FormatInt(f.source.ID, 10),
-				"--from", testutil.IMAPTestUsername, "--to", "carol@example.com", "--body", "x", "--json"},
 		} {
 			events, err := f.runCompose(t, f.adapter, grant, args...)
 			require.Error(err, args)
@@ -557,31 +432,6 @@ func TestDraftComposePersonIsOwnerOnly(t *testing.T) {
 			assert.Empty(events, args)
 		}
 	}
-	assert.Zero(*f.providerCalls)
-}
-
-func TestDraftComposePersonKeepsSourceChecks(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-	f := newPersonDraftFixture(t)
-	person := strconv.FormatInt(f.personID, 10)
-
-	_, err := f.runCompose(t, f.adapter, nil, "--person-id", person, "--to", "carol@example.com", "--body", "x")
-	require.Error(err)
-	assert.Equal("invalid_args", err.Error())
-
-	require.NoError(f.store.AddAccountIdentity(f.source.ID, "alias@example.com", "manual"))
-	events, err := f.runCompose(t, f.adapter, nil, "--person-id", person,
-		"--source-id", strconv.FormatInt(f.source.ID, 10), "--to", "carol@example.com", "--body", "x")
-	require.Error(err)
-	assert.Equal("from_ambiguous", err.Error())
-	assert.Empty(events)
-
-	f.adapter.draftPolicy = nil
-	events, err = f.composeToPerson(t, f.adapter, f.personID, "carol@example.com")
-	require.Error(err)
-	assert.Equal("draft_disabled", err.Error())
-	assert.Empty(events)
 	assert.Zero(*f.providerCalls)
 }
 
@@ -609,4 +459,65 @@ func TestDraftComposePersonListsCaseDistinctIdentifiers(t *testing.T) {
 		{Kind: "matrix", Value: "@Carol:example.org"},
 		{Kind: "matrix", Value: "@carol:example.org"},
 	})
+}
+
+func TestDraftComposePersonSaysWhenNothingIsArchived(t *testing.T) {
+	require := require.New(t)
+	f := newDraftReplyFixture(t)
+	participantID, err := f.store.EnsureParticipant("nobody@example.com", "", "example.com")
+	require.NoError(err)
+	person, _, err := f.store.CreatePersonFromParticipantContext(t.Context(), participantID)
+	require.NoError(err)
+	// A participant with no email, phone, or identifier, such as a display-name-only sender.
+	_, err = f.store.DB().Exec("UPDATE participants SET email_address = NULL WHERE id = ?", participantID)
+	require.NoError(err)
+	_, err = f.store.DB().Exec("DELETE FROM participant_identifiers WHERE participant_id = ?", participantID)
+	require.NoError(err)
+	adapter, _ := countingDraftAdapter(f)
+
+	events, err := f.runCompose(t, adapter, nil, "--person-id", strconv.FormatInt(person.ID, 10))
+	require.NoError(err)
+	require.Len(events, 1)
+	assert.Equal(t, fmt.Sprintf("person %d has no archived addresses\n", person.ID), events[0].Data)
+	assert.Empty(t, f.listPerson(t, adapter, person.ID))
+}
+
+// An imported "first last"@example.com is stored without its quotes, so the
+// list must restore them for the value to work as --to.
+func TestDraftComposePersonListsImportedQuotedMailbox(t *testing.T) {
+	for _, mailbox := range []string{`"first last"@example.com`, `" alice"@example.com`} {
+		t.Run(mailbox, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			f := newDraftReplyFixture(t)
+			raw := []byte("From: Quoted <" + mailbox + ">\r\n" +
+				"To: " + testutil.IMAPTestUsername + "\r\n" +
+				"Subject: Quoted\r\n" +
+				"Message-ID: <quoted@example.com>\r\n\r\n" +
+				"Body\r\n")
+			require.NoError(importer.IngestRawMessage(t.Context(), f.store, f.source.ID, testutil.IMAPTestUsername, "",
+				nil, "INBOX|quoted", "quoted-hash", raw, time.Now(), slog.New(slog.DiscardHandler)))
+			stored := strings.ReplaceAll(mailbox, `"`, "")
+			participantID, err := f.store.EnsureParticipant(stored, "", "example.com")
+			require.NoError(err)
+			person, _, err := f.store.CreatePersonFromParticipantContext(t.Context(), participantID)
+			require.NoError(err)
+			adapter, calls := countingDraftAdapter(f)
+
+			rows := f.listPerson(t, adapter, person.ID)
+			require.Equal([]personDraftAddress{{Kind: "email", Value: mailbox, Supported: true}}, rows)
+
+			events, err := f.runCompose(t, adapter, nil, "--source-id", strconv.FormatInt(f.source.ID, 10),
+				"--from", testutil.IMAPTestUsername, "--to", rows[0].Value, "--body", "x", "--json")
+			require.NoError(err)
+			require.Len(events, 1)
+			var result draftReplyOutput
+			require.NoError(json.Unmarshal([]byte(events[0].Data), &result))
+			assert.Equal(draftReplyStatusCreated, result.Status)
+			assert.Equal(1, *calls)
+			storedRaw, err := f.store.GetMessageRaw(result.MessageID)
+			require.NoError(err)
+			assert.Contains(string(storedRaw), "To: <"+mailbox+">")
+		})
+	}
 }

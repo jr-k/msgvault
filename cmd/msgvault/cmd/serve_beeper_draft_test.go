@@ -336,21 +336,3 @@ func TestBeeperDraftDelegatedDenialPrecedesProvider(t *testing.T) {
 	assert.Equal(created.DraftID, existing.DraftID)
 	assert.Nil(existing.Content)
 }
-
-func TestBeeperDraftRejectsPersonDirectedCompose(t *testing.T) {
-	require := require.New(t)
-	f := newBeeperDraftFixture(t)
-	participantID, err := f.store.EnsureParticipant("beeper-person@example.com", "", "example.com")
-	require.NoError(err)
-	person, _, err := f.store.CreatePersonFromParticipantContext(t.Context(), participantID)
-	require.NoError(err)
-	requestsBefore, patchesBefore := f.beeper.counts()
-
-	_, err = f.run(t, nil, api.CLIRunDraftComposeCommand, "--person-id", strconv.FormatInt(person.ID, 10),
-		"--source-id", strconv.FormatInt(f.source.ID, 10), "--to", "beeper-person@example.com", "--body", "x")
-	assertBeeperDraftCode(t, err, "draft_disabled")
-	requestsAfter, patchesAfter := f.beeper.counts()
-	assert.Equal(t, requestsBefore, requestsAfter)
-	assert.Equal(t, patchesBefore, patchesAfter)
-	assert.Equal(t, "null", f.beeper.current())
-}

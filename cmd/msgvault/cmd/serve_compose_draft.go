@@ -5,7 +5,6 @@ import (
 	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
-	"net/mail"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +30,7 @@ type draftComposeIntent struct {
 	// ConversationID selects a local chat draft instead of an IMAP draft.
 	ConversationID int64
 	ReplyTo        int64
-	// PersonID limits --to to the person's archived email addresses.
+	// PersonID lists the person's archived addresses instead of creating a draft.
 	PersonID int64
 }
 
@@ -140,25 +139,21 @@ func parseDraftComposeArgs(args []string) (draftComposeIntent, error) {
 			return invalidDraftComposeArgs("unknown flag --%s", name)
 		}
 	}
+	if intent.PersonID != 0 {
+		if intent.ConversationID != 0 || intent.ReplyTo != 0 || fromSet || accountSet || sourceIDSet || subjectSet || bodySet ||
+			len(intent.To)+len(intent.Cc)+len(intent.Bcc) > 0 {
+			return invalidDraftComposeArgs("--person-id accepts only --json")
+		}
+		return intent, nil
+	}
 	if intent.ConversationID != 0 {
-		if intent.PersonID != 0 || fromSet || accountSet || sourceIDSet || subjectSet || len(intent.To)+len(intent.Cc)+len(intent.Bcc) > 0 {
+		if fromSet || accountSet || sourceIDSet || subjectSet || len(intent.To)+len(intent.Cc)+len(intent.Bcc) > 0 {
 			return invalidDraftComposeArgs("--conversation accepts only --body, --reply-to, and --json")
 		}
 		return intent, nil
 	}
 	if intent.ReplyTo != 0 {
 		return invalidDraftComposeArgs("--reply-to requires --conversation")
-	}
-	if intent.PersonID != 0 {
-		if len(intent.To)+len(intent.Cc)+len(intent.Bcc) == 0 {
-			if fromSet || accountSet || sourceIDSet || subjectSet || bodySet {
-				return invalidDraftComposeArgs("--person-id without --to accepts only --json")
-			}
-			return intent, nil
-		}
-		if len(intent.To) != 1 {
-			return invalidDraftComposeArgs("--person-id requires exactly one --to")
-		}
 	}
 	if !accountSet && !sourceIDSet {
 		return invalidDraftComposeArgs("--account or --source-id is required")
@@ -188,16 +183,11 @@ func (a *storeAPIAdapter) runCLIComposeDraft(
 		if req.Grant != nil {
 			return draftReplyNotPermitted(errors.New("contact-directed drafts are owner-only"))
 		}
-		rows, eligible, err := a.personDraftAddresses(ctx, intent.PersonID)
+		rows, err := a.personDraftAddresses(ctx, intent.PersonID)
 		if err != nil {
 			return err
 		}
-		if len(intent.To) == 0 {
-			return emitPersonDraftAddresses(emit, intent.JSON, intent.PersonID, rows)
-		}
-		if _, key, err := parseDraftSender(intent.To[0]); err != nil || !eligible[key] {
-			return draftReplyError("invalid_compose_metadata", errors.New("--to is not one of the person's archived email addresses"))
-		}
+		return emitPersonDraftAddresses(emit, intent.JSON, intent.PersonID, rows)
 	}
 	if intent.ConversationID != 0 {
 		return a.runCLIChatDraftCreate(ctx, intent, req.Grant, emit)
@@ -205,9 +195,6 @@ func (a *storeAPIAdapter) runCLIComposeDraft(
 	if source, err := sourceops.ResolveExactOne(a.store, sourceops.Selector{
 		Account: intent.Account, SourceID: intent.SourceID, SourceIDSet: intent.SourceIDSet,
 	}); err == nil && source.SourceType == "beeper" {
-		if intent.PersonID != 0 {
-			return draftReplyError("draft_disabled", errors.New("contact-directed drafts require an IMAP source"))
-		}
 		return a.runBeeperDraftCreate(ctx, req.Grant, intent, source, emit)
 	}
 	target, from, _, err := a.resolveDraftTarget(
@@ -240,36 +227,35 @@ type personDraftAddressesOutput struct {
 }
 
 // personDraftAddresses lists the archived participant identities currently
-// bound to the person and returns the normalized keys of the supported email
-// addresses. Curated contact points and postal addresses are not archived
+// bound to the person. Curated contact points and postal addresses are not archived
 // participant identities, so they never appear here.
 func (a *storeAPIAdapter) personDraftAddresses(
 	ctx context.Context, personID int64,
-) ([]personDraftAddress, map[string]bool, error) {
+) ([]personDraftAddress, error) {
 	person, err := a.store.GetPersonContext(ctx, personID)
 	if errors.Is(err, store.ErrPersonNotFound) {
-		return nil, nil, draftReplyError("invalid_args", fmt.Errorf("person %d not found", personID))
+		return nil, draftReplyError("invalid_args", fmt.Errorf("person %d not found", personID))
 	}
 	if err != nil {
-		return nil, nil, draftReplyError("draft_read_failed", fmt.Errorf("load person %d: %w", personID, err))
+		return nil, draftReplyError("draft_read_failed", fmt.Errorf("load person %d: %w", personID, err))
 	}
 	identity, err := a.store.GetParticipantIdentityContext(ctx, person.ParticipantIDs)
 	if err != nil {
-		return nil, nil, draftReplyError("draft_read_failed", fmt.Errorf("load identities for person %d: %w", personID, err))
+		return nil, draftReplyError("draft_read_failed", fmt.Errorf("load identities for person %d: %w", personID, err))
 	}
 	rows := make([]personDraftAddress, 0)
-	eligible := make(map[string]bool)
+	supported := make(map[string]bool)
 	unsupported := make(map[[2]string]bool)
 	add := func(kind, value string) {
 		if strings.TrimSpace(value) == "" {
 			return
 		}
 		if kind == "email" {
-			if address, key, err := parseDraftSender(value); err == nil {
-				if !eligible[key] {
-					eligible[key] = true
+			if address, key, err := parseStoredMailbox(value); err == nil {
+				if !supported[key] {
+					supported[key] = true
 					// String keeps local-part quoting so the listed value parses back as --to.
-					mailbox := (&mail.Address{Address: address.Address}).String()
+					mailbox := address.String()
 					rows = append(rows, personDraftAddress{Kind: kind, Value: mailbox[1 : len(mailbox)-1], Supported: true})
 				}
 				return
@@ -292,7 +278,7 @@ func (a *storeAPIAdapter) personDraftAddresses(
 	for _, identifier := range identity.Identifiers {
 		add(identifier.Type, identifier.Value)
 	}
-	return rows, eligible, nil
+	return rows, nil
 }
 
 func emitPersonDraftAddresses(
@@ -307,6 +293,9 @@ func emitPersonDraftAddresses(
 			return draftReplyError("output_failed", err)
 		}
 		return emit(api.CLIRunEvent{Type: cliStreamStdout, Data: string(data) + "\n"})
+	}
+	if len(rows) == 0 {
+		return emit(api.CLIRunEvent{Type: cliStreamStdout, Data: fmt.Sprintf("person %d has no archived addresses\n", personID)})
 	}
 	var data strings.Builder
 	for _, row := range rows {
