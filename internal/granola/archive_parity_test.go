@@ -266,7 +266,7 @@ func TestGranolaArchiveRowsMatchBase(t *testing.T) {
 	})
 	require.NoError(err)
 	assert.EqualValues(1, second.NotesAdded)
-	assert.EqualValues(1, second.NotesUpdated)
+	assert.Zero(second.NotesUpdated, "the refetched unchanged note is not an update")
 	both := map[string]granolaArchiveRow{"not_Ab12Cd34Ef56Gh": wantFull, parityNoteID: wantParity}
 	wantCounts := map[string]int{"messages": 2, "conversations": 2, "participants": 4, "conversation_participants": 4, "message_recipients": 6}
 	check("unlimited", both, wantParticipants, wantCounts)

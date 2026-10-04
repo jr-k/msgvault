@@ -442,6 +442,31 @@ func TestImport_NormalizesSentAtToUTC(t *testing.T) {
 	assert.Equal(time.Date(2026, 6, 1, 20, 0, 0, 0, time.UTC), sentAt.UTC())
 }
 
+func TestImport_RefetchedUnchangedNoteIsNotAnUpdate(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	olderID, newerID := "not_OlderUnchanged", "not_NewerCursor"
+	// The fake ignores updated_after, so the older note is refetched unchanged.
+	api := &fakeAPI{notes: map[string][]byte{
+		olderID: noteFixtureAt(t, olderID, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)),
+		newerID: noteFixtureAt(t, newerID, time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)),
+	}}
+	imp, st := newTestImporter(t, api)
+
+	first, err := imp.Import(context.Background(), ImportOptions{Identifier: "alice@example.com"})
+	require.NoError(err)
+	require.EqualValues(2, first.NotesAdded)
+
+	second, err := imp.Import(context.Background(), ImportOptions{Identifier: "alice@example.com"})
+	require.NoError(err)
+	require.EqualValues(1, second.NotesProcessed, "the older note is refetched")
+	assert.Zero(second.NotesAdded)
+	assert.Zero(second.NotesUpdated, "an unchanged note must not count as a cache-invalidating update")
+	latest, err := st.GetLatestSync(second.SourceID)
+	require.NoError(err)
+	assert.Zero(latest.MessagesUpdated)
+}
+
 func TestImport_IdempotentAndRefresh(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
@@ -558,7 +583,18 @@ func TestImport_FatalRunPersistsSuccessfulRefreshCounters(t *testing.T) {
 	}
 	imp, st := newTestImporter(t, api)
 
-	sum, err := imp.Import(context.Background(), ImportOptions{Identifier: "alice@example.com"})
+	// Edit the note after its first ingest so the repeated page refreshes it.
+	edited := false
+	sum, err := imp.Import(context.Background(), ImportOptions{Identifier: "alice@example.com", Progress: func(line string) {
+		if edited || !strings.HasPrefix(line, "imported ") {
+			return
+		}
+		edited = true
+		api.mu.Lock()
+		api.notes["not_Ab12Cd34Ef56Gh"] = []byte(strings.ReplaceAll(string(api.notes["not_Ab12Cd34Ef56Gh"]),
+			"Quarterly Planning Review", "Quarterly Planning Review v2"))
+		api.mu.Unlock()
+	}})
 	require.Error(err)
 	assert.EqualValues(2, sum.NotesProcessed)
 	assert.EqualValues(1, sum.NotesAdded)
@@ -889,8 +925,9 @@ func TestImport_BoundedFullPreservesIncrementalCursor(t *testing.T) {
 			api.mu.Unlock()
 			incremental, err := imp.Import(context.Background(), ImportOptions{Identifier: "alice@example.com"})
 			require.NoError(err)
-			assert.EqualValues(2, incremental.NotesUpdated,
+			assert.EqualValues(2, incremental.NotesProcessed,
 				"the next incremental run must still see updates on both sides of the full-sync bound")
+			assert.EqualValues(1, incremental.NotesUpdated, "the note the bounded full run already rewrote is unchanged")
 			assert.Equal("2026-06-10T12:00:00Z", cursorOf())
 		})
 	}

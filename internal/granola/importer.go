@@ -251,7 +251,7 @@ func (imp *Importer) forEachNote(ctx context.Context, sourceID int64, params Lis
 			switch {
 			case result.Created:
 				sum.NotesAdded++
-			case result.Changed || err == nil:
+			case result.Changed:
 				sum.NotesUpdated++
 			}
 			if err != nil {
