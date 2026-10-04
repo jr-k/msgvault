@@ -469,9 +469,9 @@ func TestDraftComposePersonSaysWhenNothingIsArchived(t *testing.T) {
 	person, _, err := f.store.CreatePersonFromParticipantContext(t.Context(), participantID)
 	require.NoError(err)
 	// A participant with no email, phone, or identifier, such as a display-name-only sender.
-	_, err = f.store.DB().Exec("UPDATE participants SET email_address = NULL WHERE id = ?", participantID)
+	_, err = f.store.DB().Exec(f.store.Rebind("UPDATE participants SET email_address = NULL WHERE id = ?"), participantID)
 	require.NoError(err)
-	_, err = f.store.DB().Exec("DELETE FROM participant_identifiers WHERE participant_id = ?", participantID)
+	_, err = f.store.DB().Exec(f.store.Rebind("DELETE FROM participant_identifiers WHERE participant_id = ?"), participantID)
 	require.NoError(err)
 	adapter, _ := countingDraftAdapter(f)
 
