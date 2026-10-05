@@ -1,7 +1,7 @@
 <script lang="ts">
   import { searchParticipants as generatedSearchParticipants } from '../../api/generated/exploration/exploration';
   import { appShortcuts, Button, debounce, Modal, Typeahead, type TypeaheadOption } from '@kenn-io/kit-ui';
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import type { APIClient } from '../../api/client';
   import type { PersonSummary } from '../../explore/models';
   import type { LinkOutcome } from '../../relationships/controller.svelte';
@@ -108,8 +108,10 @@
   function handleQueryInput(value: string): void {
     query = value;
     if (value.trim() === '' && preserveSelectionOnClose) {
-      preserveSelectionOnClose = false;
+      debouncedSearch(value);
+      return;
     } else {
+      preserveSelectionOnClose = false;
       selectedID = null;
       selectedPerson = null;
       confirmError = null;
@@ -123,9 +125,14 @@
     selectedPerson = person;
     confirmError = null;
     // Typeahead reports an empty query as it closes after selection. Preserve
-    // this result through that lifecycle reset; a later empty editable field
-    // clears it before confirmation can use stale state.
+    // this result through both the close and focusout resets emitted by real
+    // browsers. Release the guard after the resulting DOM update so opening
+    // the picker again with an empty editable field still clears stale state.
     preserveSelectionOnClose = true;
+    void tick().then(async () => {
+      await tick();
+      preserveSelectionOnClose = false;
+    });
   }
   async function confirmLink(): Promise<void> {
     if (selectedID === null || confirming) return;
