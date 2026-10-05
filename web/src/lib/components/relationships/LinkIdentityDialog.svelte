@@ -26,11 +26,17 @@
   let searching = $state(false);
   let searchError = $state<string | null>(null);
   let selectedID = $state<number | null>(null);
+  let selectedPerson = $state<PersonSummary | null>(null);
   let confirming = $state(false);
   let confirmError = $state<string | null>(null);
   let preserveSelectionOnClose = false;
+  const optionRows = $derived(
+    selectedPerson && !results.some((row) => row.id === selectedPerson?.id)
+      ? [selectedPerson, ...results]
+      : results,
+  );
   const options = $derived(
-    results.map(
+    optionRows.map(
       (row): TypeaheadOption => ({
         name: String(row.id),
         label: row.display_label,
@@ -105,12 +111,16 @@
       preserveSelectionOnClose = false;
     } else {
       selectedID = null;
+      selectedPerson = null;
       confirmError = null;
     }
     debouncedSearch(value);
   }
   function selectResult(id: number): void {
+    const person = optionRows.find((row) => row.id === id);
+    if (!person) return;
     selectedID = id;
+    selectedPerson = person;
     confirmError = null;
     // Typeahead reports an empty query as it closes after selection. Preserve
     // this result through that lifecycle reset; a later empty editable field
