@@ -1,7 +1,7 @@
 <script lang="ts">
   import { searchParticipants as generatedSearchParticipants } from '../../api/generated/exploration/exploration';
   import { appShortcuts, Button, debounce, Modal, Typeahead, type TypeaheadOption } from '@kenn-io/kit-ui';
-  import { onDestroy, onMount, tick } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import type { APIClient } from '../../api/client';
   import type { PersonSummary } from '../../explore/models';
   import type { LinkOutcome } from '../../relationships/controller.svelte';
@@ -29,7 +29,6 @@
   let selectedPerson = $state<PersonSummary | null>(null);
   let confirming = $state(false);
   let confirmError = $state<string | null>(null);
-  let preserveSelectionOnClose = false;
   const optionRows = $derived(
     selectedPerson && !results.some((row) => row.id === selectedPerson?.id)
       ? [selectedPerson, ...results]
@@ -105,18 +104,24 @@
       if (generation === searchGeneration) searching = false;
     }
   }
+  function clearSelection(): void {
+    selectedID = null;
+    selectedPerson = null;
+    confirmError = null;
+  }
   function handleQueryInput(value: string): void {
     query = value;
-    if (value.trim() === '' && preserveSelectionOnClose) {
-      debouncedSearch(value);
-      return;
-    } else {
-      preserveSelectionOnClose = false;
-      selectedID = null;
-      selectedPerson = null;
-      confirmError = null;
-    }
+    // Typeahead reports an empty query while opening and may report it more
+    // than once while closing in a real browser. Only editable non-empty
+    // input is unambiguously a new search; lifecycle resets must not discard
+    // the controlled selection before the confirmation button can use it.
+    if (value.trim() !== '') clearSelection();
     debouncedSearch(value);
+  }
+  function handlePickerFocusIn(event: FocusEvent): void {
+    // Opening the editable input is the unambiguous empty-query reset that
+    // starts a new choice. Closing/refocusing lands on a button instead.
+    if (event.target instanceof HTMLInputElement) clearSelection();
   }
   function selectResult(id: number): void {
     const person = optionRows.find((row) => row.id === id);
@@ -124,15 +129,6 @@
     selectedID = id;
     selectedPerson = person;
     confirmError = null;
-    // Typeahead reports an empty query as it closes after selection. Preserve
-    // this result through both the close and focusout resets emitted by real
-    // browsers. Release the guard after the resulting DOM update so opening
-    // the picker again with an empty editable field still clears stale state.
-    preserveSelectionOnClose = true;
-    void tick().then(async () => {
-      await tick();
-      preserveSelectionOnClose = false;
-    });
   }
   async function confirmLink(): Promise<void> {
     if (selectedID === null || confirming) return;
@@ -187,7 +183,7 @@
   ariaLabel={`Link another identity for ${personLabel}`}
   onclose={requestClose}
 >
-  <div class="link-identity-dialog" aria-busy={confirming}>
+  <div class="link-identity-dialog" aria-busy={confirming} onfocusin={handlePickerFocusIn}>
     <Typeahead
       {options}
       value={selectedID === null ? '' : String(selectedID)}
