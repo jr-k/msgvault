@@ -29,7 +29,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
-    margin-bottom: var(--space-3);
+    margin-bottom: var(--space-5);
   }
 
   .page-header::before {
@@ -37,7 +37,7 @@
     z-index: 0;
     top: calc(-1 * var(--space-5));
     right: calc(-1 * var(--page-gutter));
-    bottom: calc(-1 * var(--space-4));
+    bottom: calc(-1 * var(--space-6));
     left: calc(-1 * var(--page-gutter));
     border-bottom: 1px solid var(--border-muted);
     background: var(--bg-surface);
