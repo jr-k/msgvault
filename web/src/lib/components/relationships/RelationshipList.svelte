@@ -166,6 +166,8 @@
     if (event.key === 'j' || event.key === 'ArrowDown') moveTo(activeIndex + 1);
     else if (event.key === 'k' || event.key === 'ArrowUp') moveTo(activeIndex - 1);
     else if (event.key === 'Enter' && activeIndex >= 0) onSelect(views[activeIndex]!.target);
+    else if (event.key === ' ' && activeIndex >= 0 && facet === 'people' && !bulkPending)
+      toggleRowSelection(views[activeIndex]!, activeIndex, event.shiftKey);
     else return;
     event.preventDefault();
   }
@@ -339,6 +341,7 @@
                     checked={selection.isSelected(view.target)}
                     label={`${selection.isSelected(view.target) ? 'Unselect' : 'Select'} ${view.label}`}
                     disabled={bulkPending}
+                    inGrid
                     onToggle={(range) => toggleRowSelection(view, index, range)}
                   />
                 {/if}

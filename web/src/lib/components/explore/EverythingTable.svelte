@@ -429,6 +429,7 @@
           checked={allLoadedSelected}
           mixed={!allLoadedSelected && someLoadedSelected}
           label={allLoadedSelected ? 'Unselect all loaded items' : 'Select all loaded items'}
+          inGrid
           onToggle={toggleLoadedSelection}
         />
       </span>
@@ -523,6 +524,7 @@
                   <SelectionCheckbox
                     checked={selection.isSelected(row.key)}
                     label={`${selection.isSelected(row.key) ? 'Unselect' : 'Select'} ${row.title || 'item'}`}
+                    inGrid
                     onToggle={(range) => selection.toggle(row.key, index, orderedKeys, range)}
                   />
                 </span>

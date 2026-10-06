@@ -109,7 +109,9 @@ test('one registry drives selection, searchable help, palette, and editable susp
   await expect(grid).toBeFocused();
   await page.keyboard.press('Shift+A');
   await expect(renderedRow).toHaveAttribute('aria-selected', 'true');
-  await expect(renderedRow.getByText('✓')).toBeVisible();
+  const rowCheckbox = renderedRow.getByRole('checkbox', { name: /^Unselect / });
+  await expect(rowCheckbox).toBeVisible();
+  await expect(rowCheckbox).toBeChecked();
   await page.keyboard.press('x');
   await expect(renderedRow).toHaveAttribute('aria-selected', 'false');
 

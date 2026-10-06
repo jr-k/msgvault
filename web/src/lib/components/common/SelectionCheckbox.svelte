@@ -6,6 +6,8 @@
     label: string;
     mixed?: boolean;
     disabled?: boolean;
+    /** Inside a grid, the grid keeps the only Tab stop and its own keys select rows. */
+    inGrid?: boolean;
     onToggle: (range: boolean) => void;
   }
 
@@ -14,6 +16,7 @@
     label,
     mixed = false,
     disabled = false,
+    inGrid = false,
     onToggle
   }: Props = $props();
 
@@ -25,6 +28,10 @@
      Shift and pointer events from reaching the selectable row beneath it. -->
 <span
   class="selection-checkbox"
+  {@attach (wrapper) => {
+    // Kit's Checkbox has no tabindex prop.
+    if (inGrid) wrapper.querySelector('input')?.setAttribute('tabindex', '-1');
+  }}
   onpointerdown={(event) => {
     range = event.shiftKey;
     event.stopPropagation();
