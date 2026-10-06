@@ -715,6 +715,30 @@ describe('RelationshipsWorkspace bulk Same person', () => {
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
   });
 
+  it('keeps the stale warning and Retry when the post-link list reload fails, and Retry restores the rows', async () => {
+    let listRequests = 0;
+    const rows = [relationshipRow(1, 'Alice Example'), relationshipRow(2, 'Bob Example'), relationshipRow(3, 'Cara Example')];
+    renderBulk([() => linked('stale'), () => linked('stale'), () => linked('ready')], {
+      '/api/v1/relationships': () => {
+        listRequests += 1;
+        // Request 3 is the reload after the second link.
+        if (listRequests === 3) return Response.json({ error: 'internal_error', message: 'list unavailable' }, { status: 500 });
+        return Response.json({ rows });
+      }
+    });
+
+    await selectAllPeople();
+    await fireEvent.click(screen.getByRole('button', { name: 'Same person' }));
+
+    expect(await screen.findByText('list unavailable')).toBeDefined();
+    expect(screen.queryByText('Alice Example')).toBeNull();
+    expect(await screen.findByText(/3 people are now treated as the same person\. The cache refresh failed/)).toBeDefined();
+    await fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByText('Alice Example')).toBeDefined();
+    await waitFor(() => expect(screen.getByRole('status').textContent).toBe('Identity cache refreshed.'));
+  });
+
   it('drops an earlier stale warning once a later link in the batch refreshes the cache', async () => {
     renderBulk([() => linked('stale'), () => linked('ready')]);
 

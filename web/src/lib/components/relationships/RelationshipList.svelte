@@ -249,14 +249,16 @@
           />
         {/if}
       </div>
-      {#if bulkMessage}
-        <div class="bulk-status">
-          <p class="bulk-message" class:error={bulkError} role={bulkError ? 'alert' : 'status'}>{bulkMessage}</p>
-          {#if onBulkRetry}
-            <Button size="sm" surface="outline" label="Retry" disabled={bulkPending} onclick={onBulkRetry} />
-          {/if}
-        </div>
-      {/if}
+    {/if}
+    <!-- Outside the rows check: a failed reload empties the list, and Retry is
+         how the user recovers from a stale cache. -->
+    {#if facet === 'people' && bulkMessage}
+      <div class="bulk-status">
+        <p class="bulk-message" class:error={bulkError} role={bulkError ? 'alert' : 'status'}>{bulkMessage}</p>
+        {#if onBulkRetry}
+          <Button size="sm" surface="outline" label="Retry" disabled={bulkPending} onclick={onBulkRetry} />
+        {/if}
+      </div>
     {/if}
   </div>
 
