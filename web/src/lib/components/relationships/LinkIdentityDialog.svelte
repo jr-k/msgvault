@@ -26,16 +26,10 @@
   let searching = $state(false);
   let searchError = $state<string | null>(null);
   let selectedID = $state<number | null>(null);
-  let selectedPerson = $state<PersonSummary | null>(null);
   let confirming = $state(false);
   let confirmError = $state<string | null>(null);
-  const optionRows = $derived(
-    selectedPerson && !results.some((row) => row.id === selectedPerson?.id)
-      ? [selectedPerson, ...results]
-      : results,
-  );
   const options = $derived(
-    optionRows.map(
+    results.map(
       (row): TypeaheadOption => ({
         name: String(row.id),
         label: row.display_label,
@@ -104,30 +98,18 @@
       if (generation === searchGeneration) searching = false;
     }
   }
-  function clearSelection(): void {
-    selectedID = null;
-    selectedPerson = null;
-    confirmError = null;
-  }
   function handleQueryInput(value: string): void {
     query = value;
-    // Typeahead reports an empty query while opening and may report it more
-    // than once while closing in a real browser. Only editable non-empty
-    // input is unambiguously a new search; lifecycle resets must not discard
-    // the controlled selection before the confirmation button can use it.
-    if (value.trim() !== '') clearSelection();
     debouncedSearch(value);
   }
   function handlePickerFocusIn(event: FocusEvent): void {
-    // Opening the editable input is the unambiguous empty-query reset that
-    // starts a new choice. Closing/refocusing lands on a button instead.
-    if (event.target instanceof HTMLInputElement) clearSelection();
+    // Focus reaching the search input means the picker reopened for a new choice.
+    if (!(event.target instanceof HTMLInputElement)) return;
+    selectedID = null;
+    confirmError = null;
   }
   function selectResult(id: number): void {
-    const person = optionRows.find((row) => row.id === id);
-    if (!person) return;
     selectedID = id;
-    selectedPerson = person;
     confirmError = null;
   }
   async function confirmLink(): Promise<void> {
