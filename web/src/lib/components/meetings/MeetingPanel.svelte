@@ -108,7 +108,9 @@
 </Card>
 
 <style>
-  .meeting-panel { display: grid; min-width: 0; }
+  :global(.meeting-panel-card) { width: 100%; max-width: 100%; min-width: 0; overflow: hidden; }
+  .meeting-panel, .overview-section, .actions-section { min-width: 0; }
+  .meeting-panel { display: grid; }
   .panel-heading { padding: var(--space-5) var(--space-6) var(--space-4); border-bottom: 1px solid var(--border-muted); }
   .overview-section, .actions-section { display: grid; gap: var(--space-4); padding: var(--space-5) var(--space-6); }
   .actions-section { border-top: 1px solid var(--border-muted); }
@@ -122,7 +124,7 @@
   .result-count { color: var(--text-muted); font-size: var(--font-size-xs); white-space: nowrap; }
   .state { color: var(--text-secondary); font-size: var(--font-size-sm); }
   .state--error { color: var(--text-danger); }
-  .action-filters { display: grid; grid-template-columns: minmax(10rem, auto) minmax(12rem, 1fr) auto; gap: var(--space-3); align-items: end; }
+  .action-filters { display: grid; min-width: 0; grid-template-columns: minmax(0, 12rem) minmax(0, 1fr) auto; gap: var(--space-3); align-items: end; }
   .filter-field { display: grid; min-width: 0; gap: var(--space-1); color: var(--text-muted); font-size: var(--font-size-xs); }
   @media (max-width: 760px) {
     .panel-heading, .overview-section, .actions-section { padding-inline: var(--space-4); }

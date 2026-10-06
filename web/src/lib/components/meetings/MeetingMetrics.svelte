@@ -67,7 +67,7 @@
 </section>
 
 <style>
-  .meeting-metrics { display: grid; gap: var(--space-4); }
+  .meeting-metrics { display: grid; min-width: 0; gap: var(--space-4); }
   h3, h4, p, dl, dd { margin: 0; }
   .metrics-heading { display: flex; align-items: end; justify-content: space-between; gap: var(--space-4); }
   .metrics-heading > div { display: grid; gap: var(--space-1); }
@@ -81,7 +81,7 @@
   dd { color: var(--text-primary); font-size: var(--font-size-lg); font-weight: 600; font-variant-numeric: tabular-nums; }
   .note { padding-top: var(--space-3); border-top: 1px solid var(--border-muted); color: var(--text-muted); font-size: var(--font-size-xs); line-height: 1.5; }
   .evidence-section { display: grid; gap: var(--space-2); padding-top: var(--space-3); border-top: 1px solid var(--border-muted); }
-  .table-scroll { overflow-x: auto; }
+  .table-scroll { max-width: 100%; min-width: 0; overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: var(--font-size-xs); }
   th, td { padding: var(--space-2); border-bottom: 1px solid var(--border-muted); text-align: right; }
   th:first-child { text-align: left; } th { color: var(--text-secondary); } td { color: var(--text-primary); }
