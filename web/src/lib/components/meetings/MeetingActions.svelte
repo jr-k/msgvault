@@ -79,7 +79,7 @@
         <h3 id={headingID}>Archived action items</h3>
       </div>
       {#if displayedPage}
-        <span class="meeting-count">{displayedPage.coverage.meeting_count.toLocaleString()} {displayedPage.coverage.meeting_count === 1 ? 'meeting' : 'meetings'}</span>
+        <span class="meeting-count">{displayedPage.coverage.meeting_count.toLocaleString()} in scope</span>
       {/if}
     </header>
     {#if controller.loading}
