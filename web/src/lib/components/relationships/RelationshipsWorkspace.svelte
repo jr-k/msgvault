@@ -21,11 +21,14 @@
   import type { APIClient } from '../../api/client';
   import { listPersonAttributes } from '../../api/generated/api/api';
   import type { ExplorePredicate, FileMIMEFamily, FileSearchSort, PersonFileDirection } from '../../explore/models';
+  import { ExploreSelectionState } from '../../explore/state.svelte';
   import type { RelationshipsController } from '../../relationships/controller.svelte';
   import type { RelationshipFacet, RelationshipTimelineRow } from '../../relationships/models';
+  import type { PersonMergeSuccess, ValidatedPersonMergeRequired } from '../../directory/person-merge';
   import { bufferedCallback } from '../../util/buffered-callback';
   import FilesWorkspace from '../files/FilesWorkspace.svelte';
   import SplitPane from '../layout/SplitPane.svelte';
+  import PersonBindingConflictModal from '../directory/PersonBindingConflictModal.svelte';
   import ReadingPane, { type ReadingPaneSelection } from '../reader/ReadingPane.svelte';
   import RelationshipHeader from './RelationshipHeader.svelte';
   import RelationshipCalendar from './RelationshipCalendar.svelte';
@@ -111,6 +114,16 @@
   // never the text shown in the search box, matching LinkIdentityDialog's
   // "local state for display, debounced write for the network call" split.
   let queryInput = $state(untrack(() => controller.query));
+  const listSelection = new ExploreSelectionState();
+  let bulkPending = $state(false);
+  let bulkMessage = $state<string | null>(null);
+  let bulkError = $state(false);
+  let bulkConflict = $state<ValidatedPersonMergeRequired>();
+  let bulkAnchorID = $state<number>();
+  let bulkQueue = $state<number[]>([]);
+  let bulkCompleted = $state(0);
+  let bulkTotal = $state(0);
+  let bulkContext = $state<ReturnType<RelationshipsController['personMergeContextSnapshot']>>();
 
   // A dedicated instance per component, never shared — LinkIdentityDialog's
   // own debounced search is a separate instance for the same reason; sharing
@@ -126,6 +139,9 @@
 
   function handleQueryChange(value: string): void {
     queryInput = value;
+    if (!bulkPending && !bulkConflict) listSelection.clear();
+    bulkMessage = null;
+    bulkError = false;
     debouncedSetQuery(value);
   }
 
@@ -139,6 +155,18 @@
   const layout = $derived(computeHubLayout(containerWidth));
   const predicateFingerprint = $derived(JSON.stringify(predicate));
   const selectedRowKey = $derived(selection?.kind === 'entry' ? selection.row.key : null);
+
+  let previousSelectionContext = '';
+  $effect(() => {
+    const next = `${facet}\u0000${showAll}\u0000${controller.query}\u0000${predicateFingerprint}`;
+    if (next === previousSelectionContext) return;
+    previousSelectionContext = next;
+    if (!bulkPending && !bulkConflict) {
+      untrack(() => listSelection.clear());
+      bulkMessage = null;
+      bulkError = false;
+    }
+  });
 
   // One effect ties facet/showAll/query/predicate to a single loadList call
   // — mirrors PeopleWorkspace's search effect (the fingerprint sweep is
@@ -268,6 +296,71 @@
     if (wasDrawerOpen) void focusTimelinePane();
   }
 
+  function selectedPersonIDs(): number[] {
+    return [...listSelection.explicitKeys]
+      .map((target) => /^cluster:([1-9][0-9]*)$/.exec(target)?.[1])
+      .filter((id): id is string => id !== undefined)
+      .map(Number);
+  }
+
+  async function startBulkSamePerson(): Promise<void> {
+    if (bulkPending || bulkConflict) return;
+    const ids = selectedPersonIDs();
+    if (ids.length < 2) return;
+    bulkAnchorID = ids[0];
+    bulkQueue = ids.slice(1);
+    bulkCompleted = 0;
+    bulkTotal = bulkQueue.length;
+    bulkContext = controller.personMergeContextSnapshot();
+    bulkError = false;
+    bulkPending = true;
+    await continueBulkSamePerson();
+  }
+
+  async function continueBulkSamePerson(): Promise<void> {
+    if (bulkAnchorID === undefined) return;
+    while (bulkQueue.length > 0) {
+      const nextID = bulkQueue[0]!;
+      bulkMessage = `Linking ${bulkCompleted + 1} of ${bulkTotal}…`;
+      const outcome = await controller.linkParticipants(bulkAnchorID, nextID);
+      if (outcome.ok || outcome.code === 'already_linked') {
+        bulkQueue = bulkQueue.slice(1);
+        bulkCompleted += 1;
+        continue;
+      }
+      if (outcome.code === 'merge_required') {
+        bulkPending = false;
+        bulkConflict = outcome.conflict;
+        bulkMessage = 'Resolve this profile merge to continue linking the selection.';
+        return;
+      }
+      bulkPending = false;
+      bulkError = true;
+      bulkMessage = `${bulkCompleted} of ${bulkTotal} linked. ${outcome.message}`;
+      return;
+    }
+    bulkPending = false;
+    bulkMessage = `${bulkTotal + 1} people are now treated as the same person.`;
+    listSelection.clear();
+    onAnnounce?.(bulkMessage);
+  }
+
+  async function completeBulkMerge(success: PersonMergeSuccess): Promise<void> {
+    const context = bulkContext;
+    bulkConflict = undefined;
+    onAnnounce?.(`Profiles merged into ${success.survivor.display_name?.trim() || `Person ${success.survivor.id}`}.`);
+    if (context) await controller.reconcilePersonMerge(context);
+    bulkPending = true;
+    await continueBulkSamePerson();
+  }
+
+  function cancelBulkMerge(): void {
+    bulkConflict = undefined;
+    bulkQueue = [];
+    bulkError = true;
+    bulkMessage = `${bulkCompleted} of ${bulkTotal} linked. Bulk linking was stopped.`;
+  }
+
   // Esc closes the reading pane before it ever clears `target` (see
   // handleEscape below), and selectListRow closes it before switching, so an
   // in-component walk-back never reaches here with a pane still open. An
@@ -356,10 +449,15 @@
     {showAll}
     autofocusSearch={layout === 'narrow' && mobileListOpen}
     activeTarget={target}
+    selection={listSelection}
+    {bulkPending}
+    {bulkMessage}
+    {bulkError}
     onQueryChange={handleQueryChange}
     {onFacetChange}
     {onShowAllChange}
     onSelect={selectListRow}
+    onBulkSamePerson={() => { void startBulkSamePerson(); }}
     onLoadMore={() => { void controller.loadMoreList(); }}
     {onOpenEverything}
   />
@@ -533,6 +631,15 @@
       </SplitPane>
     {/if}
   </div>
+  {#if bulkConflict}
+    <PersonBindingConflictModal
+      {client}
+      conflict={bulkConflict}
+      onOpenProfile={(personID) => onOpenDirectoryPerson?.(personID)}
+      onSuccess={completeBulkMerge}
+      onClose={cancelBulkMerge}
+    />
+  {/if}
 </main>
 
 <style>
