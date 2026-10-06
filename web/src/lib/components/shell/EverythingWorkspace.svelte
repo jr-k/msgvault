@@ -848,7 +848,7 @@
     padding: var(--space-5) var(--page-gutter) var(--space-4);
   }
 
-  .meeting-overview { max-height: 42vh; overflow: auto; flex: none; border: 1px solid var(--border-muted); }
+  .meeting-overview { max-height: 42vh; overflow: auto; flex: none; }
 
   .scope-note {
     margin: 0;

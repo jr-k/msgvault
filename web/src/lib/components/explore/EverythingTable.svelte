@@ -714,7 +714,7 @@
   }
 
   .data-row--active {
-    box-shadow: inset 2px 0 0 var(--accent-blue);
+    background: var(--bg-surface-hover);
   }
 
   .table-grid:focus-visible .data-row--active:not(.data-row--selected):not(.data-row--inspected) {
@@ -723,7 +723,6 @@
 
   .data-row--selected {
     background: var(--selected-bg);
-    box-shadow: inset 2px 0 0 var(--accent-blue), inset 0 0 0 1px var(--selected-border);
   }
 
   .cell--people :global(.kit-tooltip-trigger) { max-width: 100%; }
@@ -735,11 +734,8 @@
     text-align: right;
   }
 
-  /* The row open in the reading pane shares the app-wide selection
-   * language: 2px accent inset bar over the selected surface. */
   .data-row--inspected {
     background: var(--selected-bg);
-    box-shadow: inset 2px 0 0 var(--accent-blue);
   }
 
   .cell--title strong {

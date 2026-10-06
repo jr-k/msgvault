@@ -548,7 +548,7 @@
                 {#if meetingContext?.scope}
                   <details class="meeting-overview" open>
                     <summary>Meeting activity and follow-ups</summary>
-                    <MeetingPanel {client} scope={meetingContext.scope} refreshKey={String(controller.identityRevision ?? '')} {onOpenMeeting} />
+                    <MeetingPanel {client} scope={meetingContext.scope} refreshKey={String(controller.identityRevision ?? '')} showHeading={false} {onOpenMeeting} />
                   </details>
                 {:else if meetingContext?.error}
                   <p role="status">{meetingContext.error}</p>
@@ -768,7 +768,8 @@
   .layout-narrow :global(.drawer-toggle) { align-self: flex-start; flex: none; margin-inline: var(--page-gutter); }
 
   .meeting-overview { flex: none; }
-  .meeting-overview summary { cursor: pointer; color: var(--text-secondary); font-size: var(--font-size-sm); }
+  .meeting-overview summary { cursor: pointer; padding: var(--space-3) 0; color: var(--text-primary); font-size: var(--font-size-sm); font-weight: 600; }
+  .meeting-overview[open] summary { margin-bottom: var(--space-2); }
 
   .pane-reading {
     height: 100%;

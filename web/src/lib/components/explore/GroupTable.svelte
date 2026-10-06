@@ -484,12 +484,11 @@
   }
 
   .group-row--active {
-    box-shadow: inset 2px 0 0 var(--accent-blue);
+    background: var(--bg-surface-hover);
   }
 
   .group-row--inspected {
     background: var(--selected-bg);
-    box-shadow: inset 2px 0 0 var(--accent-blue);
   }
 
   .group-state {
