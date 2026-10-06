@@ -124,6 +124,9 @@
   let bulkCompleted = $state(0);
   let bulkTotal = $state(0);
   let bulkContext = $state<ReturnType<RelationshipsController['personMergeContextSnapshot']>>();
+  // The latest successful link reports whether the identity cache refreshed.
+  // A stale cache keeps a warning and Retry, which repeats this idempotent link.
+  let bulkStaleLink = $state<{ a: number; b: number } | null>(null);
 
   // A dedicated instance per component, never shared — LinkIdentityDialog's
   // own debounced search is a separate instance for the same reason; sharing
@@ -140,8 +143,10 @@
   function handleQueryChange(value: string): void {
     queryInput = value;
     if (!bulkPending && !bulkConflict) listSelection.clear();
-    bulkMessage = null;
-    bulkError = false;
+    if (!bulkStaleLink) {
+      bulkMessage = null;
+      bulkError = false;
+    }
     debouncedSetQuery(value);
   }
 
@@ -163,8 +168,10 @@
     previousSelectionContext = next;
     if (!bulkPending && !bulkConflict) {
       untrack(() => listSelection.clear());
-      bulkMessage = null;
-      bulkError = false;
+      if (!untrack(() => bulkStaleLink)) {
+        bulkMessage = null;
+        bulkError = false;
+      }
     }
   });
 
@@ -324,6 +331,7 @@
       bulkMessage = `Linking ${bulkCompleted + 1} of ${bulkTotal}…`;
       const outcome = await controller.linkParticipants(bulkAnchorID, nextID);
       if (outcome.ok || outcome.code === 'already_linked') {
+        if (outcome.ok) bulkStaleLink = outcome.cacheState === 'stale' ? { a: bulkAnchorID, b: nextID } : null;
         bulkQueue = bulkQueue.slice(1);
         bulkCompleted += 1;
         continue;
@@ -336,21 +344,24 @@
       }
       bulkPending = false;
       bulkError = true;
-      bulkMessage = `${bulkCompleted} of ${bulkTotal} linked. ${outcome.message}`;
+      bulkMessage = `${bulkCompleted} of ${bulkTotal} linked. ${outcome.message}${staleCacheNote()}`;
       return;
     }
     bulkPending = false;
-    bulkMessage = `${bulkTotal + 1} people are now treated as the same person.`;
+    bulkError = bulkStaleLink !== null;
+    bulkMessage = `${bulkTotal + 1} people are now treated as the same person.${staleCacheNote()}`;
     listSelection.clear();
     onAnnounce?.(bulkMessage);
   }
 
   async function completeBulkMerge(success: PersonMergeSuccess): Promise<void> {
     const context = bulkContext;
+    // Stay locked while the merge reconciles; otherwise Same person is enabled
+    // again and a second batch would share this batch's queue and counters.
+    bulkPending = true;
     bulkConflict = undefined;
     onAnnounce?.(`Profiles merged into ${success.survivor.display_name?.trim() || `Person ${success.survivor.id}`}.`);
     if (context) await controller.reconcilePersonMerge(context);
-    bulkPending = true;
     await continueBulkSamePerson();
   }
 
@@ -358,7 +369,28 @@
     bulkConflict = undefined;
     bulkQueue = [];
     bulkError = true;
-    bulkMessage = `${bulkCompleted} of ${bulkTotal} linked. Bulk linking was stopped.`;
+    bulkMessage = `${bulkCompleted} of ${bulkTotal} linked. Bulk linking was stopped.${staleCacheNote()}`;
+  }
+
+  function staleCacheNote(): string {
+    return bulkStaleLink
+      ? ' The cache refresh failed — groupings may be stale until a rebuild. Retrying is safe.'
+      : '';
+  }
+
+  async function retryBulkCacheRefresh(): Promise<void> {
+    if (!bulkStaleLink || bulkPending) return;
+    const { a, b } = bulkStaleLink;
+    bulkPending = true;
+    try {
+      const outcome = await controller.linkParticipants(a, b);
+      if (!outcome.ok || outcome.cacheState === 'stale') return;
+      bulkStaleLink = null;
+      bulkError = false;
+      bulkMessage = 'Identity cache refreshed.';
+    } finally {
+      bulkPending = false;
+    }
   }
 
   // Esc closes the reading pane before it ever clears `target` (see
@@ -458,6 +490,7 @@
     {onShowAllChange}
     onSelect={selectListRow}
     onBulkSamePerson={() => { void startBulkSamePerson(); }}
+    onBulkRetry={bulkStaleLink ? () => { void retryBulkCacheRefresh(); } : undefined}
     onLoadMore={() => { void controller.loadMoreList(); }}
     {onOpenEverything}
   />

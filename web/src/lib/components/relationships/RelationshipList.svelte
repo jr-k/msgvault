@@ -30,6 +30,7 @@
     onShowAllChange: (value: boolean) => void;
     onSelect: (target: string) => void;
     onBulkSamePerson?: () => void;
+    onBulkRetry?: () => void;
     onLoadMore?: () => void;
     onOpenEverything?: () => void;
   }
@@ -64,6 +65,7 @@
     onShowAllChange,
     onSelect,
     onBulkSamePerson = undefined,
+    onBulkRetry = undefined,
     onLoadMore = undefined,
     onOpenEverything = undefined
   }: Props = $props();
@@ -246,7 +248,12 @@
         {/if}
       </div>
       {#if bulkMessage}
-        <p class="bulk-message" class:error={bulkError} role={bulkError ? 'alert' : 'status'}>{bulkMessage}</p>
+        <div class="bulk-status">
+          <p class="bulk-message" class:error={bulkError} role={bulkError ? 'alert' : 'status'}>{bulkMessage}</p>
+          {#if onBulkRetry}
+            <Button size="sm" surface="outline" label="Retry" disabled={bulkPending} onclick={onBulkRetry} />
+          {/if}
+        </div>
       {/if}
     {/if}
   </div>
@@ -405,7 +412,14 @@
     flex: 1;
   }
 
+  .bulk-status {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
   .bulk-message {
+    flex: 1;
     margin: 0;
     padding-inline: var(--space-2);
     color: var(--text-muted);
