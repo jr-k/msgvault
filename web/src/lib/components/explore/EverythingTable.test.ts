@@ -154,7 +154,8 @@ describe('EverythingTable', () => {
     await rendered.rerender({ columns: ['title', 'size'] });
 
     expect(screen.getAllByRole('columnheader').map((header) => header.textContent?.trim()))
-      .toEqual(['Subject / title', 'Size']);
+      .toEqual(['', 'Subject / title', 'Size']);
+    expect(screen.getByRole('checkbox', { name: 'Select all loaded items' })).toBeDefined();
   });
 
   it('keeps keyboard focus on the grid while j/k move a stable keyed cursor', async () => {
@@ -369,7 +370,7 @@ describe('EverythingTable', () => {
     expect(skeleton.style.gridTemplateColumns).toBe(
       screen.getByRole('row', { name: /Kind/ }).style.gridTemplateColumns
     );
-    expect(skeleton.children).toHaveLength(6);
+    expect(skeleton.children).toHaveLength(7);
 
     void rerender({ rows: [], selection, loading: false });
     expect(screen.getByText('No items match this view')).toBeDefined();
