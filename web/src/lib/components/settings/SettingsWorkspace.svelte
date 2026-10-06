@@ -792,8 +792,6 @@
   }
   .settings-header {
     padding: var(--space-5) var(--page-gutter) var(--space-4);
-    background: var(--bg-surface);
-    border-bottom: 1px solid var(--border-muted);
   }
   .settings :global(.kit-settings) {
     background: var(--bg-surface);
