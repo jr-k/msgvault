@@ -208,6 +208,11 @@ export class DirectoryController {
   async selectPerson(personID: number | null): Promise<void> {
     await this.loadSelection(personID, true);
   }
+  removeDeletedPeople(personIDs: readonly number[]): void {
+    const deleted = new Set(personIDs);
+    this.rows = this.rows.filter((row) => !deleted.has(row.id));
+    for (const personID of deleted) this.removeDeletedPerson(personID);
+  }
   /** Re-read server-owned Directory projections after a committed split. */
   async reconcilePersonSplit(_context: PersonSplitCommittedContext): Promise<void> {
     await this.reloadFirstPage();

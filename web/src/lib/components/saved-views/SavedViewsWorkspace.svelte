@@ -253,10 +253,7 @@
     flex-direction: column;
     gap: var(--space-4);
     padding: var(--space-5) var(--page-gutter) var(--space-4);
-  }
-  .saved-views > :global(:not(header)) {
-    width: 100%;
-    max-width: 960px;
+    background: var(--bg-primary);
   }
   article,
   .actions {
@@ -281,12 +278,24 @@
   }
   .view-list {
     display: grid;
-    gap: var(--space-2);
+    width: 100%;
+    overflow: hidden;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface);
+    box-shadow: var(--shadow-sm);
   }
   article {
     justify-content: space-between;
-    padding: var(--space-3);
+    min-height: 64px;
+    padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--border-muted);
+  }
+  article:last-child {
+    border-bottom: 0;
+  }
+  article:hover {
+    background: var(--bg-surface-hover);
   }
   .view-copy {
     display: grid;
