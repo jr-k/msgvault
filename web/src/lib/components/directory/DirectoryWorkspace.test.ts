@@ -343,7 +343,7 @@ describe('DirectoryWorkspace', () => {
     /** Answers DELETE /api/v1/people/{id} from `deletes` and every list read
      * from `pages` in order, recording which list reads asked for page one. */
     function renderDirectory(
-      pages: Array<{ people: ReturnType<typeof person>[]; next_cursor?: string }>,
+      pages: Array<{ people: ReturnType<typeof person>[]; next_cursor?: string } | (() => Response)>,
       deletes: Record<number, () => Response>
     ) {
       const pageOneReads: number[] = [];
@@ -354,7 +354,8 @@ describe('DirectoryWorkspace', () => {
         if (request.method === 'DELETE' && match) return deletes[Number(match[1])]!();
         listReads += 1;
         if (!new URL(request.url).searchParams.get('cursor')) pageOneReads.push(listReads);
-        return Response.json(pages.shift() ?? { people: [] });
+        const page = pages.shift() ?? { people: [] };
+        return typeof page === 'function' ? page() : Response.json(page);
       }));
       render(DirectoryWorkspace, { client, controller: new DirectoryController(client), state });
       return { pageOneReads };
@@ -380,6 +381,28 @@ describe('DirectoryWorkspace', () => {
       expect(await screen.findByText('2 people deleted.')).toBeDefined();
       expect(screen.getByRole('row', { name: /Charlie Fixture/ })).toBeDefined();
       expect(pageOneReads).toEqual([1, 2]);
+    });
+
+    it('keeps the deletion outcome visible when the page-one reload fails', async () => {
+      renderDirectory(
+        [
+          { people: [person(1, 'Alpha Fixture'), person(2, 'Bravo Fixture')] },
+          () => Response.json({ error: 'internal_error', message: 'Directory unavailable' }, { status: 500 })
+        ],
+        {
+          1: () => new Response(null, { status: 204 }),
+          2: () => Response.json(
+            { error: 'person_merge_active', message: "Split the person's active merge lineage before deleting this profile" },
+            { status: 409 }
+          )
+        }
+      );
+
+      await deleteAllLoaded();
+
+      expect(await screen.findByText('Directory unavailable')).toBeDefined();
+      expect(await screen.findByText('1 deleted; 1 could not be deleted:')).toBeDefined();
+      expect(screen.getByText(/active merge lineage before deleting this profile/)).toBeDefined();
     });
 
     it('shows the server message for each person that could not be deleted', async () => {

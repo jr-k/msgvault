@@ -103,8 +103,25 @@
   }
 </script>
 
+{#snippet bulkStatus()}
+  {#if bulkMessage}
+    <div class="bulk-status" role={bulkError ? 'alert' : 'status'}>
+      <p class="bulk-message" class:error={bulkError}>{bulkMessage}</p>
+      {#if bulkFailures.length > 0}
+        <ul class="bulk-failures">
+          {#each bulkFailures as failure, index (index)}
+            <li><strong>{failure.name}:</strong> {failure.message}</li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+  {/if}
+{/snippet}
+
 <section class="directory-list" aria-label="Directory results">
   {#if error && rows.length === 0}
+    <!-- The reload after a bulk delete can fail; its outcome must survive. -->
+    {@render bulkStatus()}
     <div role="alert" class="notice">{error}</div>
   {:else}
     {#if pageError}
@@ -148,18 +165,7 @@
       </div>
     {/if}
     <!-- Outside the rows check: a bulk delete can empty the list. -->
-    {#if bulkMessage}
-      <div class="bulk-status" role={bulkError ? 'alert' : 'status'}>
-        <p class="bulk-message" class:error={bulkError}>{bulkMessage}</p>
-        {#if bulkFailures.length > 0}
-          <ul class="bulk-failures">
-            {#each bulkFailures as failure, index (index)}
-              <li><strong>{failure.name}:</strong> {failure.message}</li>
-            {/each}
-          </ul>
-        {/if}
-      </div>
-    {/if}
+    {@render bulkStatus()}
     {#if loading && rows.length === 0}
       <p role="status" class="empty">Loading people…</p>
     {:else if rows.length === 0}
