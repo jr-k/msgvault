@@ -342,6 +342,17 @@ test('clicking a people label preserves Everything keyboard navigation and one g
   await expect.poll(() => grid.evaluate(element => element.contains(document.activeElement))).toBe(false);
 });
 
+test('clicking an Everything row checkbox keeps keyboard selection in the grid', async ({ page }) => {
+  const grid = page.getByRole('grid', { name: 'Everything results' });
+  const renderedRow = page.locator('[data-row-key="message:1"]');
+  await renderedRow.hover();
+  await renderedRow.getByRole('checkbox', { name: /^Select / }).click();
+  await expect(renderedRow).toHaveAttribute('aria-selected', 'true');
+  await expect(grid).toBeFocused();
+  await page.keyboard.press('x');
+  await expect(renderedRow).toHaveAttribute('aria-selected', 'false');
+});
+
 test('clicking a filename returns to Files keyboard navigation without extra row tab stops', async ({ page }) => {
   const files = [1, 2].map(id => ({
     id, key: `file:${id}`, entry_key: `message:${id}`, message_id: id, conversation_id: id,
