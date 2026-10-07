@@ -280,7 +280,7 @@ describe('DirectoryWorkspace', () => {
     await waitFor(() => expect(commits).toContainEqual({ directoryPersonID: 42 }));
     await waitFor(() => expect(controller.selectedPersonID).toBe(42));
     expect(await screen.findByText('4 meetings')).toBeDefined();
-    expect(await screen.findByText('0 matching action items')).toBeDefined();
+    expect(await screen.findByText('0 matching')).toBeDefined();
   });
 
   it('keeps loaded rows visible when loading another page fails and retries that page', async () => {

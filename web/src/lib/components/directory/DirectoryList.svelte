@@ -170,7 +170,7 @@
             onkeydown={handleKeydown}
             onclick={() => { activeID = person.id; onSelect(person.id); }}
           >
-            <span class="avatar-slot">
+            <span role="gridcell" class="avatar-slot">
               <span class="person-icon"><UserRoundIcon size={16} aria-hidden="true" /></span>
               <SelectionCheckbox
                 checked={selection.isSelected(String(person.id))}

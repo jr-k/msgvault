@@ -54,8 +54,7 @@
   <section
     class="meeting-panel"
     class:meeting-panel--compact={!showHeading}
-    aria-labelledby={showHeading ? headingID : undefined}
-    aria-label={showHeading ? undefined : 'Meeting activity'}
+    aria-label="Meeting activity"
   >
     {#if showHeading}
       <header class="panel-heading">

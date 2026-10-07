@@ -582,11 +582,12 @@
   }
 
   .result-row.active {
-    background: var(--bg-surface-hover);
+    box-shadow: inset 2px 0 0 var(--accent-blue);
   }
 
   .result-row.selected {
     background: var(--selected-bg);
+    box-shadow: inset 2px 0 0 var(--accent-blue);
   }
 
   .row-main {
