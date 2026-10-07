@@ -589,7 +589,7 @@ describe('RelationshipsWorkspace bulk Same person', () => {
   /** Serves three people and answers each identity link from `linkResponses`
    * in order, recording the participant pair every link request carried. */
   function renderBulk(
-    linkResponses: Array<() => Response>,
+    linkResponses: Array<() => Response | Promise<Response>>,
     overrides: Record<string, (request: Request) => Promise<Response> | Response> = {}
   ) {
     const links: Array<{ participant_a: number; participant_b: number }> = [];
@@ -605,8 +605,9 @@ describe('RelationshipsWorkspace bulk Same person', () => {
       },
       ...overrides
     });
-    render(RelationshipsWorkspace, { props: baseProps(fetchFn) });
-    return { links };
+    const props = baseProps(fetchFn);
+    const { rerender } = render(RelationshipsWorkspace, { props });
+    return { links, props, rerender };
   }
 
   async function selectAllPeople(): Promise<void> {
@@ -684,6 +685,25 @@ describe('RelationshipsWorkspace bulk Same person', () => {
       { participant_a: 1, participant_b: 2 },
       { participant_a: 1, participant_b: 3 }
     ]);
+  });
+
+  it('drops a selection made under earlier filters once a batch interrupted by Back/Forward stops', async () => {
+    let failLink: (() => void) | undefined;
+    const { props, rerender } = renderBulk([
+      () => new Promise<Response>((resolve) => {
+        failLink = () => resolve(Response.json({ error: 'internal_error', message: 'link failed' }, { status: 500 }));
+      })
+    ]);
+
+    await selectAllPeople();
+    await fireEvent.click(screen.getByRole('button', { name: 'Same person' }));
+    await waitFor(() => expect(failLink).toBeDefined());
+    await rerender({ ...props, showAll: true });
+    failLink?.();
+
+    expect((await screen.findByRole('alert')).textContent).toBe('0 of 2 linked. link failed');
+    expect(screen.queryByText('3 selected')).toBeNull();
+    expect(screen.getByRole('checkbox', { name: 'Select Alice Example' })).toHaveProperty('checked', false);
   });
 
   it('stops the batch without linking the rest when the profile merge is cancelled', async () => {

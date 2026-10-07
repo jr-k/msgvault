@@ -162,16 +162,29 @@
   const selectedRowKey = $derived(selection?.kind === 'entry' ? selection.row.key : null);
 
   let previousSelectionContext = '';
+  // A context change during a batch (Back/Forward can change filters while
+  // the list is locked) must still drop the selection once the batch stops,
+  // so the next batch cannot link people the new filters hide.
+  let selectionResetPending = false;
   $effect(() => {
     const next = `${facet}\u0000${showAll}\u0000${controller.query}\u0000${predicateFingerprint}`;
-    if (next === previousSelectionContext) return;
-    previousSelectionContext = next;
-    if (!bulkPending && !bulkConflict) {
+    const locked = bulkPending || bulkConflict !== undefined;
+    if (next !== previousSelectionContext) {
+      previousSelectionContext = next;
+      if (locked) {
+        selectionResetPending = true;
+        return;
+      }
       untrack(() => listSelection.clear());
       if (!untrack(() => bulkStaleLink)) {
         bulkMessage = null;
         bulkError = false;
       }
+      return;
+    }
+    if (!locked && selectionResetPending) {
+      selectionResetPending = false;
+      untrack(() => listSelection.clear());
     }
   });
 

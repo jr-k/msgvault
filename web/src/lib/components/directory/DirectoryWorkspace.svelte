@@ -48,6 +48,7 @@
   let bulkDeletePending = $state(false);
   let bulkMessage = $state<string | null>(null);
   let bulkError = $state(false);
+  let bulkFailures = $state<Array<{ name: string; message: string }>>([]);
   let confirmBulkDelete = $state(false);
   const selectedPeople = $derived(
     controller.rows.filter((person) => listSelection.isSelected(String(person.id)))
@@ -164,6 +165,7 @@
     listSelection.clear();
     bulkMessage = null;
     bulkError = false;
+    bulkFailures = [];
     confirmBulkDelete = false;
   });
 
@@ -202,9 +204,13 @@
     bulkDeletePending = true;
     bulkMessage = null;
     bulkError = false;
+    bulkFailures = [];
     const deletedIDs: number[] = [];
-    const failures: string[] = [];
+    // The server explains how to unblock each person (unpublish from
+    // CardDAV, split a merge), so keep its message per person.
+    const failures: Array<{ name: string; message: string }> = [];
     for (const person of targets) {
+      const name = person.display_name ?? `Person ${person.id}`;
       try {
         const response = await generatedDeletePerson(
           { id: person.id },
@@ -214,13 +220,13 @@
           }
         );
         if (response.response.status === 204) deletedIDs.push(person.id);
-        else failures.push(person.display_name ?? `Person ${person.id}`);
-      } catch {
-        failures.push(person.display_name ?? `Person ${person.id}`);
+        else failures.push({ name, message: deleteFailureMessage(response.error, response.response.status) });
+      } catch (cause: unknown) {
+        failures.push({ name, message: deleteFailureMessage(cause, 0) });
       }
     }
-    controller.removeDeletedPeople(deletedIDs);
     for (const personID of deletedIDs) listSelection.explicitKeys.delete(String(personID));
+    await controller.removeDeletedPeople(deletedIDs);
     confirmBulkDelete = false;
     bulkDeletePending = false;
     if (failures.length === 0) {
@@ -229,7 +235,16 @@
       return;
     }
     bulkError = true;
-    bulkMessage = `${deletedIDs.length.toLocaleString()} deleted; ${failures.length.toLocaleString()} could not be deleted. Reload the directory and try again.`;
+    bulkFailures = failures;
+    bulkMessage = `${deletedIDs.length.toLocaleString()} deleted; ${failures.length.toLocaleString()} could not be deleted:`;
+  }
+
+  function deleteFailureMessage(error: unknown, status: number): string {
+    if (typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string' && error.message) {
+      return error.message;
+    }
+    if (error instanceof Error && error.message) return error.message;
+    return status ? `Request failed (${status})` : 'Request failed';
   }
 </script>
 
@@ -318,6 +333,7 @@
       bulkPending={bulkDeletePending}
       {bulkMessage}
       {bulkError}
+      {bulkFailures}
       onSelect={(personID) => void controller.selectPerson(personID)}
       onBulkDelete={beginBulkDelete}
       onLoadMore={() => void controller.loadNextPage()}

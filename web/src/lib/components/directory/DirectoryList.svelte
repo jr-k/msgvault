@@ -20,6 +20,7 @@
     bulkPending?: boolean;
     bulkMessage?: string | null;
     bulkError?: boolean;
+    bulkFailures?: Array<{ name: string; message: string }>;
     onSelect: (personID: number) => void;
     onBulkDelete?: () => void;
     onLoadMore: () => void;
@@ -39,6 +40,7 @@
     bulkPending = false,
     bulkMessage = null,
     bulkError = false,
+    bulkFailures = [],
     onSelect,
     onBulkDelete = undefined,
     onLoadMore,
@@ -69,6 +71,8 @@
   }
 
   function handleKeydown(event: KeyboardEvent): void {
+    // Keys on the row's checkbox belong to the checkbox, not to row navigation.
+    if (event.target !== event.currentTarget) return;
     if (event.metaKey || event.ctrlKey || event.altKey || rows.length === 0) return;
     if (event.key === 'ArrowDown' || event.key === 'j') void moveTo(activeIndex + 1);
     else if (event.key === 'ArrowUp' || event.key === 'k') void moveTo(activeIndex - 1);
@@ -142,9 +146,19 @@
           <Button size="sm" surface="soft" label="Clear" disabled={bulkPending} onclick={() => selection.clear()} />
         {/if}
       </div>
-      {#if bulkMessage}
-        <p class="bulk-message" class:error={bulkError} role={bulkError ? 'alert' : 'status'}>{bulkMessage}</p>
-      {/if}
+    {/if}
+    <!-- Outside the rows check: a bulk delete can empty the list. -->
+    {#if bulkMessage}
+      <div class="bulk-status" role={bulkError ? 'alert' : 'status'}>
+        <p class="bulk-message" class:error={bulkError}>{bulkMessage}</p>
+        {#if bulkFailures.length > 0}
+          <ul class="bulk-failures">
+            {#each bulkFailures as failure, index (index)}
+              <li><strong>{failure.name}:</strong> {failure.message}</li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
     {/if}
     {#if loading && rows.length === 0}
       <p role="status" class="empty">Loading people…</p>
@@ -208,6 +222,7 @@
   .selection-label { min-width: 0; flex: 1; }
   .bulk-message { margin: 0; padding-inline: var(--space-2); color: var(--text-muted); font-size: var(--font-size-xs); }
   .bulk-message.error { color: var(--text-danger); }
+  .bulk-failures { margin: var(--space-1) 0 0; padding-inline: var(--space-6) var(--space-2); color: var(--text-secondary); font-size: var(--font-size-xs); }
   .avatar-slot { position: relative; display: grid; width: 24px; height: 24px; flex: none; place-items: center; }
   .person-icon, .avatar-slot :global(.selection-checkbox) { position: absolute; transition: opacity 80ms ease-out, transform 80ms ease-out; }
   .person-icon { display: grid; width: 24px; height: 24px; place-items: center; border-radius: 50%; background: var(--bg-inset); color: var(--text-muted); }

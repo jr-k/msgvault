@@ -525,7 +525,11 @@
                     checked={selection.isSelected(row.key)}
                     label={`${selection.isSelected(row.key) ? 'Unselect' : 'Select'} ${row.title || 'item'}`}
                     inGrid
-                    onToggle={(range) => selection.toggle(row.key, index, orderedKeys, range)}
+                    onToggle={(range) => {
+                      activeKey = row.key;
+                      onActiveKey?.(row.key);
+                      selection.toggle(row.key, index, orderedKeys, range);
+                    }}
                   />
                 </span>
                 {#each visibleColumns as column (column)}

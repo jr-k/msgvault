@@ -174,6 +174,22 @@ describe('EverythingTable', () => {
     expect(grid.getAttribute('aria-activedescendant')).toContain('message-3a-2');
   });
 
+  it('makes a checkbox row current, so Space next acts on that row', async () => {
+    const selection = new ExploreSelectionState();
+    const onActiveKey = vi.fn();
+    render(EverythingTable, { rows: [row(1), row(2), row(3)], selection, onActiveKey });
+    const grid = screen.getByRole('grid', { name: 'Everything results' });
+
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'Select Synthetic subject 2' }));
+    expect(selection.isSelected('message:2')).toBe(true);
+    expect(grid.getAttribute('aria-activedescendant')).toContain('message-3a-2');
+    expect(onActiveKey).toHaveBeenLastCalledWith('message:2');
+
+    await fireEvent.keyDown(grid, { key: ' ' });
+    expect(selection.isSelected('message:2')).toBe(false);
+    expect(selection.isSelected('message:1')).toBe(false);
+  });
+
   it('requests another cursor page when navigation or scrolling reaches the loaded boundary', async () => {
     const onLoadMore = vi.fn().mockResolvedValue(undefined);
     render(EverythingTable, {
